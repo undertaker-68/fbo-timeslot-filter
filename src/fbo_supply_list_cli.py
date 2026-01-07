@@ -5,7 +5,7 @@ from .logger import logger
 from .ozon_client import iter_accounts
 from .timeslot_filter import is_timeslot_valid
 
-from .ms_sync import sync_orders_to_ms_dry
+from .ms_sync import sync_orders_to_ms
 
 def get_states():
     """
@@ -114,7 +114,7 @@ def main():
             ]
 
             try:
-                ms_result = sync_orders_to_ms_dry(client, client.name.upper(), kept)
+                ms_result = sync_orders_to_ms(client, client.name.upper(), kept)
                 logger.info("[%s] MS DRY result: %s", client.name, ms_result)
             except Exception as e:
                 logger.exception("[%s] MS DRY error: %s", client.name, e)
