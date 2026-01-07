@@ -113,6 +113,9 @@ def main():
                 and is_timeslot_valid(o)
             ]
 
+            ms_result = sync_orders_to_ms_dry(client, client.name.upper(), kept)
+            logger.info("[%s] MS DRY result: %s", client.name, ms_result)
+
             logger.info(
                 "[%s] Всего заявок: %s; после фильтра: %s",
                 client.name,
