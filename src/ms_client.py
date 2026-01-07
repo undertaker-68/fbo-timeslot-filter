@@ -96,6 +96,15 @@ class MSClient:
         r = self._request_with_retry("POST", url, json=payload)
         return r.json()
 
+    def find_customerorder_by_name(self, name: str) -> dict | None:
+        # ищем ровно по имени
+        data = self.get("/entity/customerorder", params={"filter": f"name={name}", "limit": 1})
+        rows = data.get("rows") or []
+        return rows[0] if rows else None
+
+    def create_customerorder(self, payload: dict) -> dict:
+        return self.post("/entity/customerorder", payload)
+
     def find_assortment_by_article(self, article: str) -> dict | None:
         """
         Ищем в /entity/assortment по article (с учётом лат/кир гомоглифов).
