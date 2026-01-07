@@ -5,13 +5,16 @@ from .logger import logger
 from .ozon_client import iter_accounts
 from .timeslot_filter import is_timeslot_valid
 
+
 def get_states():
-    # из .env можно задать: SUPPLY_STATES=CREATED,CONFIRMED,IN_PROCESS,IN_TRANSIT,DELIVERED
+    """
+    Статусы поставок (supply.state), которые считаем валидными.
+    Можно переопределить через ENV: SUPPLY_STATES=...
+    """
     raw = os.getenv("SUPPLY_STATES", "").strip()
     if raw:
         return [s.strip() for s in raw.split(",") if s.strip()]
 
-    # дефолтные “нормальные” статусы
     return [
         "READY_TO_SUPPLY",
         "ACCEPTED_AT_SUPPLY_WAREHOUSE",
@@ -23,22 +26,35 @@ def get_states():
         "REPORT_REJECTED",
     ]
 
+
+def order_has_wanted_supply_state(order: dict, wanted_states: set[str]) -> bool:
+    """
+    Проверяем, есть ли у заявки хотя бы одна поставка
+    с нужным supply.state
+    """
+    for s in order.get("supplies", []) or []:
+        if s.get("state") in wanted_states:
+            return True
+    return False
+
+
 def main():
-    # Рабочий payload, который ты проверил в PowerShell
+    states = get_states()
+
     payload = {
         "limit": 100,
         "sort_by": 1,
         "sort_direction": "DESC",
         "filter": {
-            "states": get_states(),  # если нужно больше статусов — расширим
+            "states": states,
             "date_from": "2025-12-01T00:00:00Z",
             "date_to": "2026-12-31T23:59:59Z",
         },
     }
 
-    logger.info("States: %s", payload["filter"]["states"])
-    
-    all_results: dict = {}
+    logger.info("States: %s", states)
+
+    all_results = {}
 
     accounts = list(iter_accounts())
     if not accounts:
@@ -48,17 +64,14 @@ def main():
         try:
             logger.info("[%s] Using Client-Id=%s", client.name, client.client_id)
 
-            data = client.supply_order_list(payload)
-
-            # Ozon иногда возвращает { "result": {...} }, а иногда сразу { "order_ids": [...], "last_id": "..." }
-            result = data.get("result") or data
-
+            # ---------- LIST с пагинацией ----------
             all_order_ids = []
             page_last_id = None
 
             while True:
                 page_payload = payload.copy()
                 page_payload["filter"] = payload["filter"].copy()
+
                 if page_last_id:
                     page_payload["last_id"] = page_last_id
 
@@ -69,69 +82,65 @@ def main():
                 all_order_ids.extend(ids)
 
                 page_last_id = result.get("last_id")
-                if not page_last_id:
-                    break
-                if page_last_id == "":
+                if not page_last_id or page_last_id == "":
                     break
 
-            order_ids = all_order_ids
-            last_id = page_last_id
-
-            # last_id иногда приходит пустой строкой
-            if last_id == "":
-                last_id = None
-
-            if not order_ids:
-                logger.info("[%s] order_ids пустой. last_id=%s", client.name, last_id)
-                all_results[client.name] = {"orders": [], "last_id": last_id}
+            if not all_order_ids:
+                logger.info("[%s] Нет заявок по list-фильтру", client.name)
+                all_results[client.name] = {"orders": [], "last_id": None}
                 continue
 
-            # Получаем полные данные по заявкам
-            # /v3/supply-order/get принимает 1..50 order_ids за раз
+            # ---------- GET батчами по 50 ----------
             all_orders = []
-            for i in range(0, len(order_ids), 50):
-                chunk = order_ids[i:i+50]
+            for i in range(0, len(all_order_ids), 50):
+                chunk = all_order_ids[i:i + 50]
                 details = client.supply_order_get(chunk)
-                chunk_orders = (details.get("result", {}).get("orders") or details.get("orders") or [])
+                chunk_orders = (
+                    details.get("result", {}).get("orders")
+                    or details.get("orders")
+                    or []
+                )
                 if isinstance(chunk_orders, list):
                     all_orders.extend(chunk_orders)
 
-            orders = all_orders
+            wanted_states = set(states)
 
-            if not isinstance(orders, list):
-                logger.warning("[%s] Неожиданная структура supply-order/get", client.name)
-                all_results[client.name] = {"error": "unexpected get response structure"}
-                continue
+            kept = [
+                o for o in all_orders
+                if order_has_wanted_supply_state(o, wanted_states)
+                and is_timeslot_valid(o)
+            ]
 
-            wanted_states = set(payload["filter"]["states"])
+            logger.info(
+                "[%s] Всего заявок: %s; после фильтра: %s",
+                client.name,
+                len(all_orders),
+                len(kept),
+            )
 
-            def order_has_wanted_supply_state(order: dict) -> bool:
-                for s in order.get("supplies", []) or []:
-                    if s.get("state") in wanted_states:
-                        return True
-                return False
-
-            kept = [o for o in orders if order_has_wanted_supply_state(o) and is_timeslot_valid(o)]
-            logger.info("[%s] Всего заявок: %s; после фильтра: %s", client.name, len(orders), len(kept))
-
-            all_results[client.name] = {"orders": kept, "last_id": last_id}
+            all_results[client.name] = {
+                "orders": kept,
+                "last_id": page_last_id,
+            }
 
         except Exception as e:
             logger.exception("[%s] Ошибка: %s", client.name, e)
             all_results[client.name] = {"error": str(e)}
 
-    # Вывод результата — один раз после обработки всех аккаунтов
-        out = json.dumps(all_results, ensure_ascii=False)
+    # ---------- ВЫВОД (ОДИН РАЗ) ----------
+    out = json.dumps(all_results, ensure_ascii=False)
 
-        out_file = os.getenv("OUT_FILE")
-        if out_file:
-            with open(out_file, "w", encoding="utf-8") as f:
-                f.write(out)
-            logger.info("Saved output to %s", out_file)
-        else:
-            try:
-                print(out)
-            except BrokenPipeError:
-                pass
+    out_file = os.getenv("OUT_FILE")
+    if out_file:
+        with open(out_file, "w", encoding="utf-8") as f:
+            f.write(out)
+        logger.info("Saved output to %s", out_file)
+    else:
+        try:
+            print(out)
+        except BrokenPipeError:
+            pass
+
+
 if __name__ == "__main__":
     main()
