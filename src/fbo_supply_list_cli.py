@@ -63,8 +63,11 @@ def main():
             logger.exception("[%s] Ошибка запроса/обработки: %s", client.name, e)
             all_results[client.name] = {"error": str(e)}
 
-    print(json.dumps(all_results, ensure_ascii=False))
-
+        try:
+            print(json.dumps(all_results, ensure_ascii=False))
+        except BrokenPipeError:
+            # когда вывод режут через head/pipe — тихо выходим
+            pass
 
 if __name__ == "__main__":
     main()
