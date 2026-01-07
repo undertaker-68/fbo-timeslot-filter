@@ -5,6 +5,14 @@ from .logger import logger
 from .ozon_client import iter_accounts
 from .timeslot_filter import is_timeslot_valid
 
+def get_states():
+    # из .env можно задать: SUPPLY_STATES=CREATED,CONFIRMED,IN_PROCESS,IN_TRANSIT,DELIVERED
+    raw = os.getenv("SUPPLY_STATES", "").strip()
+    if raw:
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+    # дефолтные “нормальные” статусы
+    return ["CREATED", "CONFIRMED", "IN_PROCESS", "IN_TRANSIT", "DELIVERED"]
 
 def main():
     # Рабочий payload, который ты проверил в PowerShell
@@ -13,12 +21,14 @@ def main():
         "sort_by": 1,
         "sort_direction": "DESC",
         "filter": {
-            "states": ["IN_TRANSIT"],  # если нужно больше статусов — расширим
+            "states": get_states(),  # если нужно больше статусов — расширим
             "date_from": "2025-12-01T00:00:00Z",
             "date_to": "2026-12-31T23:59:59Z",
         },
     }
 
+    logger.info("[%s] States: %s", client.name, payload["filter"]["states"])
+    
     all_results: dict = {}
 
     accounts = list(iter_accounts())
