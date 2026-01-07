@@ -107,7 +107,8 @@ def main():
 
             kept = [
                 o for o in all_orders
-                if order_has_wanted_supply_state(o, wanted_states)
+                if not o.get("order_tags", {}).get("is_virtual", False)
+                and order_has_wanted_supply_state(o, wanted_states)
                 and is_timeslot_valid(o)
             ]
 
