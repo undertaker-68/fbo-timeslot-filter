@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fbo-timeslot-filter"
+version = "0.1.0"
+description = "FBO supplies filter by timeslot date"
+requires-python = ">=3.10"
+dependencies = [
+  "python-dateutil",
+  "pytz",
+  "python-dotenv",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
