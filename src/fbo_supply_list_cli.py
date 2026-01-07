@@ -27,7 +27,7 @@ def main():
         },
     }
 
-    logger.info("[%s] States: %s", client.name, payload["filter"]["states"])
+    logger.info("States: %s", payload["filter"]["states"])
     
     all_results: dict = {}
 
@@ -38,7 +38,6 @@ def main():
     for client in accounts:
         try:
             logger.info("[%s] Using Client-Id=%s", client.name, client.client_id)
-            logger.info("[%s] List payload: %s", client.name, json.dumps(payload, ensure_ascii=False))
 
             data = client.supply_order_list(payload)
 
@@ -53,7 +52,7 @@ def main():
                 last_id = None
 
             if not order_ids:
-                logger.info("[%s] order_ids пустой (нет заявок по фильтру). last_id=%s", client.name, last_id)
+                logger.info("[%s] order_ids пустой. last_id=%s", client.name, last_id)
                 all_results[client.name] = {"orders": [], "last_id": last_id}
                 continue
 
@@ -72,7 +71,7 @@ def main():
             all_results[client.name] = {"orders": kept, "last_id": last_id}
 
         except Exception as e:
-            logger.exception("[%s] Ошибка запроса/обработки: %s", client.name, e)
+            logger.exception("[%s] Ошибка: %s", client.name, e)
             all_results[client.name] = {"error": str(e)}
 
     # Вывод результата — один раз после обработки всех аккаунтов
