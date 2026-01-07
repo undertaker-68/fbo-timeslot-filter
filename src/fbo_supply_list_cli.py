@@ -26,7 +26,11 @@ def main():
     for client in accounts:
         try:
             logger.info("[%s] Using Client-Id=%s", client.name, client.client_id)
+            logger.info("[%s] List payload: %s", client.name, json.dumps(payload, ensure_ascii=False))
+            
             data = client.supply_order_list(payload)
+            
+            logger.info("[%s] List response (short): %s", client.name, json.dumps(data, ensure_ascii=False)[:800])
             result = data.get("result", {})
             order_ids = result.get("order_ids", []) or []
             last_id = result.get("last_id")
