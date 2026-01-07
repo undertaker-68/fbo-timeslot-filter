@@ -4,20 +4,18 @@ from .ozon_client import iter_accounts
 from .timeslot_filter import is_timeslot_valid
 
 
-def extract_orders(data: dict) -> list:
-    result = data.get("result", data)
-    orders = (
-        result.get("orders")
-        or result.get("supply_orders")
-        or result.get("items")
-        or result.get("supplies")
-        or []
-    )
-    return orders if isinstance(orders, list) else []
-
-
 def main():
-    payload = {}
+    # Рабочий payload, который ты проверил в PowerShell
+    payload = {
+        "limit": 1000,
+        "sort_by": 1,
+        "sort_direction": "DESC",
+        "filter": {
+            "states": ["IN_TRANSIT"],  # если нужно больше статусов — расширим
+            "date_from": "2025-12-01T00:00:00Z",
+            "date_to": "2026-12-31T23:59:59Z",
+        },
+    }
 
     all_results = {}
 
@@ -28,10 +26,29 @@ def main():
     for client in accounts:
         try:
             data = client.supply_order_list(payload)
-            orders = extract_orders(data)
+            result = data.get("result", {})
+            order_ids = result.get("order_ids", []) or []
+            last_id = result.get("last_id")
+
+            if not order_ids:
+                logger.info("[%s] order_ids пустой (нет заявок по фильтру). last_id=%s", client.name, last_id)
+                all_results[client.name] = {"orders": [], "last_id": last_id}
+                continue
+
+            # Получаем полные данные по заявкам
+            details = client.supply_order_get(order_ids)
+            orders = (details.get("result", {}).get("orders") or details.get("orders") or [])
+
+            if not isinstance(orders, list):
+                logger.warning("[%s] Неожиданная структура supply-order/get", client.name)
+                all_results[client.name] = {"error": "unexpected get response structure"}
+                continue
+
             kept = [o for o in orders if is_timeslot_valid(o)]
             logger.info("[%s] Всего заявок: %s; после фильтра: %s", client.name, len(orders), len(kept))
-            all_results[client.name] = kept
+
+            all_results[client.name] = {"orders": kept, "last_id": last_id}
+
         except Exception as e:
             logger.exception("[%s] Ошибка запроса/обработки: %s", client.name, e)
             all_results[client.name] = {"error": str(e)}
