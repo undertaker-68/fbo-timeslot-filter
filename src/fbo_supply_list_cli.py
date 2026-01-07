@@ -75,20 +75,17 @@ def main():
             all_results[client.name] = {"error": str(e)}
 
     # Вывод результата — один раз после обработки всех аккаунтов
-    out = json.dumps(all_results, ensure_ascii=False)
+        out = json.dumps(all_results, ensure_ascii=False)
 
-    out_file = os.getenv("OUT_FILE")
-    if out_file:
-        with open(out_file, "w", encoding="utf-8") as f:
-            f.write(out)
-        logger.info("Saved output to %s", out_file)
-    else:
-        try:
-            print(out)
-        except BrokenPipeError:
-            # если режут вывод через pipe/head — не считаем это ошибкой
-            pass
-
-
+        out_file = os.getenv("OUT_FILE")
+        if out_file:
+            with open(out_file, "w", encoding="utf-8") as f:
+                f.write(out)
+            logger.info("Saved output to %s", out_file)
+        else:
+            try:
+                print(out)
+            except BrokenPipeError:
+                pass
 if __name__ == "__main__":
     main()
