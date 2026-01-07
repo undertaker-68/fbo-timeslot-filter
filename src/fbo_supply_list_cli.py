@@ -5,6 +5,7 @@ from .logger import logger
 from .ozon_client import iter_accounts
 from .timeslot_filter import is_timeslot_valid
 
+from .ms_sync import sync_orders_to_ms_dry
 
 def get_states():
     """
