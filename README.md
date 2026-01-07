@@ -12,4 +12,3 @@
 ```env
 TIMEZONE=Asia/Krasnoyarsk
 MIN_DATE=2025-12-03
-
