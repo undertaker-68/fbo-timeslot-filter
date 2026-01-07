@@ -177,6 +177,85 @@ def build_ms_positions(ms: MSClient, ozon_positions: list[dict]) -> tuple[list[d
 
     return ms_positions, errors
 
+def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
+    mode = (os.getenv("MS_MODE") or "DRY").upper()
+    ms = MSClient()
+    kit_rules = load_kit_rules()
+
+    created = 0
+    skipped = 0
+    duplicates = 0
+    errors: list[str] = []
+
+    for o in ozon_orders:
+        # пропускаем виртуальные
+        if (o.get("order_tags") or {}).get("is_virtual"):
+            skipped += 1
+            continue
+
+        oz_pos = ozon_positions_from_bundle(ozon_client, o)
+        if not oz_pos:
+            skipped += 1
+            continue
+
+        oz_pos = apply_kit_rules(oz_pos, kit_rules)
+
+        ms_pos, errs = build_ms_positions(ms, oz_pos)
+        if errs:
+            errors.append(f'order_id={o.get("order_id")}: ' + "; ".join(errs))
+        if not ms_pos:
+            skipped += 1
+            continue
+
+        payload = build_customerorder_payload(account_name, o, ms_pos)
+        name = payload.get("name")
+
+        # анти-дубли: если заказ с таким name уже есть — пропускаем
+        try:
+            existing = ms.find_customerorder_by_name(name)
+        except Exception as e:
+            errors.append(f'order_id={o.get("order_id")}: cannot check duplicate: {e}')
+            continue
+
+        if existing:
+            duplicates += 1
+            logger.info("[%s] Skip duplicate CustomerOrder name=%s order_id=%s",
+                        account_name, name, o.get("order_id"))
+            continue
+
+        if mode == "DRY":
+            created += 1
+            logger.info("[DRY][%s] Would create CustomerOrder: name=%s positions=%s order_id=%s",
+                        account_name, name, len(ms_pos), o.get("order_id"))
+            continue
+
+        if mode == "LIVE":
+            try:
+                created_doc = ms.create_customerorder(payload)
+                created += 1
+                logger.info("[%s] Created CustomerOrder: name=%s id=%s order_id=%s",
+                            account_name, name, created_doc.get("id"), o.get("order_id"))
+            except Exception as e:
+                errors.append(f'order_id={o.get("order_id")}: create failed: {e}')
+            continue
+
+        raise RuntimeError(f"Unknown MS_MODE={mode}. Use DRY or LIVE")
+
+    return {
+        "mode": mode,
+        "created_or_would_create": created,
+        "skipped": skipped,
+        "duplicates": duplicates,
+        "errors_count": len(errors),
+        "errors": errors[:50],
+    }
+
+
+# совместимость со старым именем
+def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
+    os.environ["MS_MODE"] = (os.getenv("MS_MODE") or "DRY")
+    return sync_orders_to_ms(ozon_client, account_name, ozon_orders)
+
 
 def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
