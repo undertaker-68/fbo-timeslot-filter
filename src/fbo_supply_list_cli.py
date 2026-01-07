@@ -1,7 +1,7 @@
 import json
-from logger import logger
-from ozon_client import iter_accounts
-from timeslot_filter import is_timeslot_valid
+from .logger import logger
+from .ozon_client import iter_accounts
+from .timeslot_filter import is_timeslot_valid
 
 
 def extract_orders(data: dict) -> list:
