@@ -1,4 +1,6 @@
 import os
+import time
+import random
 import requests
 from dotenv import load_dotenv
 
@@ -44,24 +46,85 @@ class MSClient:
             "Accept": "application/json;charset=utf-8",
         })
 
+        # кэш: article -> meta (или None если не найдено)
+        self._article_cache: dict[str, dict | None] = {}
+
+    def _request_with_retry(self, method: str, url: str, *, params=None, json=None, max_attempts: int = 8) -> requests.Response:
+        last_exc = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = self.session.request(method, url, params=params, json=json, timeout=60)
+
+                # retry on 429 / 5xx
+                if r.status_code == 429 or (500 <= r.status_code <= 599):
+                    ra = r.headers.get("Retry-After")
+                    if ra:
+                        try:
+                            delay = float(ra)
+                        except Exception:
+                            delay = 1.0
+                    else:
+                        delay = min(10.0, 0.6 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
+
+                    if attempt == max_attempts:
+                        raise RuntimeError(f"MS {method} {url} -> {r.status_code}: {(r.text or '')[:2000]}")
+
+                    time.sleep(delay)
+                    continue
+
+                if r.status_code >= 400:
+                    raise RuntimeError(f"MS {method} {url} -> {r.status_code}: {(r.text or '')[:2000]}")
+
+                # чуть-чуть троттлим даже на успехе (чтобы меньше ловить 429)
+                time.sleep(0.03)
+                return r
+
+            except (requests.Timeout, requests.ConnectionError) as e:
+                last_exc = e
+                delay = min(10.0, 0.6 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
+                time.sleep(delay)
+
+        raise RuntimeError(f"MS {method} failed after retries: {url}. Last error: {last_exc}")
+
     def get(self, path: str, params: dict | None = None) -> dict:
         url = f"{MS_BASE_URL}{path}"
-        r = self.session.get(url, params=params, timeout=60)
-        if r.status_code >= 400:
-            raise RuntimeError(f"MS GET {url} -> {r.status_code}: {(r.text or '')[:2000]}")
+        r = self._request_with_retry("GET", url, params=params)
         return r.json()
 
     def post(self, path: str, payload: dict) -> dict:
         url = f"{MS_BASE_URL}{path}"
-        r = self.session.post(url, json=payload, timeout=60)
-        if r.status_code >= 400:
-            raise RuntimeError(f"MS POST {url} -> {r.status_code}: {(r.text or '')[:2000]}")
+        r = self._request_with_retry("POST", url, json=payload)
         return r.json()
 
     def find_assortment_by_article(self, article: str) -> dict | None:
+        """
+        Ищем в /entity/assortment по article (с учётом лат/кир гомоглифов).
+        Возвращаем meta или None.
+        С кэшем, чтобы не бить МС сотни раз одним и тем же артикулом.
+        """
+        article = (article or "").strip()
+        if not article:
+            return None
+
+        if article in self._article_cache:
+            return self._article_cache[article]
+
+        # пробуем варианты (лат/кир)
         for a in variants_lat_cyr(article):
+            # кэш на конкретный вариант тоже полезен
+            if a in self._article_cache:
+                meta = self._article_cache[a]
+                self._article_cache[article] = meta
+                return meta
+
             data = self.get("/entity/assortment", params={"filter": f"article={a}", "limit": 1})
             rows = data.get("rows") or []
-            if rows:
-                return rows[0].get("meta")
+            meta = rows[0].get("meta") if rows else None
+
+            self._article_cache[a] = meta
+            if meta:
+                self._article_cache[article] = meta
+                return meta
+
+        self._article_cache[article] = None
         return None
