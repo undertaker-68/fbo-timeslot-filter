@@ -53,8 +53,29 @@ def main():
             # Ozon иногда возвращает { "result": {...} }, а иногда сразу { "order_ids": [...], "last_id": "..." }
             result = data.get("result") or data
 
-            order_ids = result.get("order_ids") or []
-            last_id = result.get("last_id")
+            all_order_ids = []
+            page_last_id = None
+
+            while True:
+                page_payload = payload.copy()
+                page_payload["filter"] = payload["filter"].copy()
+                if page_last_id:
+                    page_payload["last_id"] = page_last_id
+
+                data = client.supply_order_list(page_payload)
+                result = data.get("result") or data
+
+                ids = result.get("order_ids") or []
+                all_order_ids.extend(ids)
+
+                page_last_id = result.get("last_id")
+                if not page_last_id:
+                    break
+                if page_last_id == "":
+                    break
+
+            order_ids = all_order_ids
+            last_id = page_last_id
 
             # last_id иногда приходит пустой строкой
             if last_id == "":
