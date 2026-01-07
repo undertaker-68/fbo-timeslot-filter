@@ -7,7 +7,7 @@ from .timeslot_filter import is_timeslot_valid
 def main():
     # Рабочий payload, который ты проверил в PowerShell
     payload = {
-        "limit": 1000,
+        "limit": 100,
         "sort_by": 1,
         "sort_direction": "DESC",
         "filter": {
