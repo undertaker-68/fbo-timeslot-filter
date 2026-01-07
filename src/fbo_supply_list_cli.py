@@ -29,11 +29,16 @@ def main():
             logger.info("[%s] List payload: %s", client.name, json.dumps(payload, ensure_ascii=False))
             
             data = client.supply_order_list(payload)
-            
-            logger.info("[%s] List response (short): %s", client.name, json.dumps(data, ensure_ascii=False)[:800])
-            result = data.get("result", {})
-            order_ids = result.get("order_ids", []) or []
+
+            # Ozon иногда возвращает { "result": {...} }, а иногда сразу { "order_ids": [...], "last_id": "..." }
+            result = data.get("result") or data
+
+            order_ids = result.get("order_ids") or []
             last_id = result.get("last_id")
+
+            # last_id иногда приходит пустой строкой
+            if last_id == "":
+                last_id = None
 
             if not order_ids:
                 logger.info("[%s] order_ids пустой (нет заявок по фильтру). last_id=%s", client.name, last_id)
