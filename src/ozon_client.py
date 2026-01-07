@@ -46,6 +46,30 @@ class OzonClient:
         _raise_for_status_with_body(r, self.name)
         return r.json()
 
+    def supply_order_bundle_items(self, bundle_id: str, limit: int = 1000) -> list[dict]:
+        url = f"{BASE_URL}/v1/supply-order/bundle"
+        items: list[dict] = []
+        last_id = ""
+
+        while True:
+            payload = {"bundle_ids": [bundle_id], "limit": limit}
+            if last_id:
+                payload["last_id"] = last_id
+
+            r = self.session.post(url, json=payload, timeout=60)
+            _raise_for_status_with_body(r, self.name)
+            data = r.json() or {}
+
+            items.extend(data.get("items", []) or [])
+            if not data.get("has_next"):
+                break
+
+            last_id = data.get("last_id") or ""
+            if not last_id:
+                break
+
+        return [{"offer_id": x.get("offer_id"), "quantity": x.get("quantity")} for x in items]
+
 def iter_accounts(prefix: str = "OZON", max_accounts: int = 20):
     """
     Ожидаем переменные вида:
