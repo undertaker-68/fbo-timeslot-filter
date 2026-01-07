@@ -1,5 +1,6 @@
 import json
 import os
+
 from .logger import logger
 from .ozon_client import iter_accounts
 from .timeslot_filter import is_timeslot_valid
@@ -18,7 +19,7 @@ def main():
         },
     }
 
-    all_results = {}
+    all_results: dict = {}
 
     accounts = list(iter_accounts())
     if not accounts:
@@ -28,7 +29,7 @@ def main():
         try:
             logger.info("[%s] Using Client-Id=%s", client.name, client.client_id)
             logger.info("[%s] List payload: %s", client.name, json.dumps(payload, ensure_ascii=False))
-            
+
             data = client.supply_order_list(payload)
 
             # Ozon иногда возвращает { "result": {...} }, а иногда сразу { "order_ids": [...], "last_id": "..." }
@@ -64,19 +65,21 @@ def main():
             logger.exception("[%s] Ошибка запроса/обработки: %s", client.name, e)
             all_results[client.name] = {"error": str(e)}
 
-        try:
-            out = json.dumps(all_results, ensure_ascii=False)
+    # Вывод результата — один раз после обработки всех аккаунтов
+    out = json.dumps(all_results, ensure_ascii=False)
 
-            out_file = os.getenv("OUT_FILE")
-            if out_file:
-                with open(out_file, "w", encoding="utf-8") as f:
-                    f.write(out)
-                logger.info("Saved output to %s", out_file)
-            else:
-                try:
-                    print(out)
-                except BrokenPipeError:
-                    pass
+    out_file = os.getenv("OUT_FILE")
+    if out_file:
+        with open(out_file, "w", encoding="utf-8") as f:
+            f.write(out)
+        logger.info("Saved output to %s", out_file)
+    else:
+        try:
+            print(out)
+        except BrokenPipeError:
+            # если режут вывод через pipe/head — не считаем это ошибкой
+            pass
+
 
 if __name__ == "__main__":
     main()
