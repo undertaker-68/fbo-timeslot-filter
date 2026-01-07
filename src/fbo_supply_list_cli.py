@@ -66,8 +66,16 @@ def main():
                 continue
 
             # Получаем полные данные по заявкам
-            details = client.supply_order_get(order_ids)
-            orders = (details.get("result", {}).get("orders") or details.get("orders") or [])
+            # /v3/supply-order/get принимает 1..50 order_ids за раз
+            all_orders = []
+            for i in range(0, len(order_ids), 50):
+                chunk = order_ids[i:i+50]
+                details = client.supply_order_get(chunk)
+                chunk_orders = (details.get("result", {}).get("orders") or details.get("orders") or [])
+                if isinstance(chunk_orders, list):
+                    all_orders.extend(chunk_orders)
+
+            orders = all_orders
 
             if not isinstance(orders, list):
                 logger.warning("[%s] Неожиданная структура supply-order/get", client.name)
