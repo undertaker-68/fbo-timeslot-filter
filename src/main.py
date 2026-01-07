@@ -1,4 +1,4 @@
-from timeslot_filter import is_timeslot_valid
+from .timeslot_filter import is_timeslot_valid
 
 
 def process_orders(orders: list[dict]):
