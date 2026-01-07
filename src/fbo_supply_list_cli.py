@@ -12,7 +12,16 @@ def get_states():
         return [s.strip() for s in raw.split(",") if s.strip()]
 
     # дефолтные “нормальные” статусы
-    return ["CREATED", "CONFIRMED", "IN_PROCESS", "IN_TRANSIT", "DELIVERED"]
+    return [
+        "READY_TO_SUPPLY",
+        "ACCEPTED_AT_SUPPLY_WAREHOUSE",
+        "IN_TRANSIT",
+        "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
+        "REPORTS_CONFIRMATION_AWAITING",
+        "COMPLETED",
+        "REJECTED_AT_SUPPLY_WAREHOUSE",
+        "REPORT_REJECTED",
+    ]
 
 def main():
     # Рабочий payload, который ты проверил в PowerShell
@@ -65,7 +74,15 @@ def main():
                 all_results[client.name] = {"error": "unexpected get response structure"}
                 continue
 
-            kept = [o for o in orders if is_timeslot_valid(o)]
+            wanted_states = set(payload["filter"]["states"])
+
+            def order_has_wanted_supply_state(order: dict) -> bool:
+                for s in order.get("supplies", []) or []:
+                    if s.get("state") in wanted_states:
+                        return True
+                return False
+
+            kept = [o for o in orders if order_has_wanted_supply_state(o) and is_timeslot_valid(o)]
             logger.info("[%s] Всего заявок: %s; после фильтра: %s", client.name, len(orders), len(kept))
 
             all_results[client.name] = {"orders": kept, "last_id": last_id}
