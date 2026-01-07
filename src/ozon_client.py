@@ -24,11 +24,16 @@ class OzonClient:
         })
 
     def supply_order_list(self, payload: dict) -> dict:
-        url = f"{BASE_URL}/v1/supply-order/list"
+        url = f"{BASE_URL}/v3/supply-order/list"
         r = self.session.post(url, json=payload, timeout=60)
         r.raise_for_status()
         return r.json()
 
+    def supply_order_get(self, order_ids: list[int]) -> dict:
+        url = f"{BASE_URL}/v3/supply-order/get"
+        r = self.session.post(url, json={"order_ids": order_ids}, timeout=60)
+        r.raise_for_status()
+        return r.json()
 
 def iter_accounts(prefix: str = "OZON", max_accounts: int = 20):
     """
