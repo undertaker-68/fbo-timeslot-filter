@@ -74,7 +74,7 @@ def build_customerorder_payload(account_name: str, ozon_order: dict, ms_position
     timeslot_from = ((ozon_order.get("timeslot") or {}).get("timeslot") or {}).get("from")
 
     payload = {
-        "name": f"{name_prefix} {order_number or order_id}",
+        "name": f"{name_prefix}{order_number or order_id}",
         "organization": _ms_meta("organization", org_id),
         "agent": _ms_meta("counterparty", agent_id),
         "store": _ms_meta("store", store_id),
