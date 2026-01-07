@@ -1,2 +1,4 @@
 python-dateutil
 pytz
+pytest
+python-dotenv

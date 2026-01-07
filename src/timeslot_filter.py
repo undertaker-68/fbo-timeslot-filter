@@ -1,8 +1,8 @@
 import pytz
 from dateutil import parser
 
-from config import TIMEZONE, MIN_DATE
-from logger import logger
+from .config import TIMEZONE, MIN_DATE
+from .logger import logger
 
 
 def is_timeslot_valid(order: dict) -> bool:
@@ -17,7 +17,4 @@ def is_timeslot_valid(order: dict) -> bool:
     local_tz = pytz.timezone(TIMEZONE)
     local_dt = utc_dt.astimezone(local_tz)
 
-    if local_dt.date() < MIN_DATE:
-        return False
-
-    return True
+    return local_dt.date() >= MIN_DATE
