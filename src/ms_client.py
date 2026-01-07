@@ -40,8 +40,8 @@ class MSClient:
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Content-Type": "application/json;charset=utf-8",
+            "Accept": "application/json;charset=utf-8",
         })
 
     def get(self, path: str, params: dict | None = None) -> dict:
