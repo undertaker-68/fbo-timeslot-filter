@@ -27,7 +27,6 @@ def load_kit_rules() -> dict[str, list[str]]:
     MS_KIT_RULES формат:
       10264-А93:10264+11291;00020-А92:00020+11278;...
     Возвращаем dict: { kit_article: [component_article1, component_article2, ...] }
-    Учитываем лат/кир: ключи нормализуем через варианты.
     """
     raw = (os.getenv("MS_KIT_RULES") or "").strip()
     if not raw:
@@ -47,15 +46,17 @@ def load_kit_rules() -> dict[str, list[str]]:
 
 
 def resolve_saleschannel_id(account_name: str) -> str:
-    # account_name: ozon_1 / ozon_2
-    key = f"MS_SALESCHANNEL_ID_{account_name.upper()}"  # OZON_1, OZON_2
+    # account_name: OZON_1 / OZON_2 (вызов идёт с .upper() из cli)
+    key = f"MS_SALESCHANNEL_ID_{account_name}"
     v = os.getenv(key)
     if v:
         return v
+
     # fallback (если вдруг захочешь общий)
     v2 = os.getenv("MS_SALESCHANNEL_ID")
     if v2:
         return v2
+
     raise RuntimeError("Не задан канал продаж: MS_SALESCHANNEL_ID_OZON_1/2 (или общий MS_SALESCHANNEL_ID)")
 
 
@@ -66,7 +67,7 @@ def build_customerorder_payload(account_name: str, ozon_order: dict, ms_position
     state_id = load_ms_required("MS_STATE_ID")
     saleschannel_id = resolve_saleschannel_id(account_name)
 
-    name_prefix = os.getenv("MS_NAME_PREFIX", "OZON FBO")
+    name_prefix = os.getenv("MS_NAME_PREFIX", "fbo-")
     comment_prefix = os.getenv("MS_COMMENT_PREFIX", "Ozon FBO supply-order")
 
     order_id = ozon_order.get("order_id")
@@ -74,6 +75,7 @@ def build_customerorder_payload(account_name: str, ozon_order: dict, ms_position
     timeslot_from = ((ozon_order.get("timeslot") or {}).get("timeslot") or {}).get("from")
 
     payload = {
+        # ВАЖНО: без пробела
         "name": f"{name_prefix}{order_number or order_id}",
         "organization": _ms_meta("organization", org_id),
         "agent": _ms_meta("counterparty", agent_id),
@@ -108,7 +110,7 @@ def ozon_positions_from_bundle(ozon_client, ozon_order: dict) -> list[dict]:
         return []
 
     items = ozon_client.supply_order_bundle_items(bundle_id)
-    out = []
+    out: list[dict] = []
     for it in items:
         art = (it.get("offer_id") or "").strip()
         qty = float(it.get("quantity") or 0)
@@ -125,7 +127,7 @@ def apply_kit_rules(positions: list[dict], kit_rules: dict[str, list[str]]) -> l
     if not kit_rules:
         return positions
 
-    # построим индекс правил с учётом вариантов лат/кир для ключей
+    # индекс правил по всем вариантам лат/кир
     index: dict[str, list[str]] = {}
     for kit, comps in kit_rules.items():
         for v in variants_lat_cyr(kit):
@@ -146,7 +148,7 @@ def apply_kit_rules(positions: list[dict], kit_rules: dict[str, list[str]]) -> l
             out.append(p)
             continue
 
-        # разворачиваем по правилам
+        # разворачиваем комплект
         for c_art in comps:
             out.append({"article": c_art, "quantity": qty, "source_kit": art})
 
@@ -177,6 +179,24 @@ def build_ms_positions(ms: MSClient, ozon_positions: list[dict]) -> tuple[list[d
 
     return ms_positions, errors
 
+
+def _find_customerorder_by_name(ms: MSClient, name: str) -> dict | None:
+    # используем метод, если ты его добавил
+    if hasattr(ms, "find_customerorder_by_name"):
+        return ms.find_customerorder_by_name(name)  # type: ignore[attr-defined]
+
+    data = ms.get("/entity/customerorder", params={"filter": f"name={name}", "limit": 1})
+    rows = data.get("rows") or []
+    return rows[0] if rows else None
+
+
+def _create_customerorder(ms: MSClient, payload: dict) -> dict:
+    # используем метод, если ты его добавил
+    if hasattr(ms, "create_customerorder"):
+        return ms.create_customerorder(payload)  # type: ignore[attr-defined]
+    return ms.post("/entity/customerorder", payload)
+
+
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     mode = (os.getenv("MS_MODE") or "DRY").upper()
     max_live = int(os.getenv("MS_LIVE_MAX", "0") or "0")
@@ -185,65 +205,13 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     kit_rules = load_kit_rules()
 
     created = 0
+    would_create = 0
     skipped = 0
     duplicates = 0
     errors: list[str] = []
 
     for o in ozon_orders:
-        # стоп-кран для LIVE
-        if mode == "LIVE" and max_live > 0 and created >= max_live:
-            logger.info("[%s] Reached MS_LIVE_MAX=%s, stopping.", account_name, max_live)
-            break
-
         # пропускаем виртуальные
-        if (o.get("order_tags") or {}).get("is_virtual"):
-            skipped += 1
-            continue
-
-        # ... дальше твоя логика: bundle -> kit_rules -> build_ms_positions -> duplicate check ...
-
-        if mode == "DRY":
-            created += 1
-            logger.info("[DRY][%s] Would create CustomerOrder: ...", account_name)
-            continue
-
-        if mode == "LIVE":
-            created_doc = ms.create_customerorder(payload)
-            created += 1
-            logger.info("[%s] Created CustomerOrder: name=%s id=%s", account_name, payload.get("name"), created_doc.get("id"))
-            continue
-
-    return {
-        "mode": mode,
-        "created_or_would_create": created,
-        "skipped": skipped,
-        "duplicates": duplicates,
-        "errors_count": len(errors),
-        "errors": errors[:50],
-    }
-
-# совместимость со старым именем
-def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
-    os.environ["MS_MODE"] = (os.getenv("MS_MODE") or "DRY")
-    return sync_orders_to_ms(ozon_client, account_name, ozon_orders)
-
-
-def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
-    """
-    DRY режим: ничего не создаём. Только готовим payload и логируем итог.
-    """
-    mode = (os.getenv("MS_MODE") or "DRY").upper()
-    if mode != "DRY":
-        raise RuntimeError("Пока включён только DRY. Для LIVE сделаем отдельным шагом после проверки.")
-
-    ms = MSClient()
-    kit_rules = load_kit_rules()
-
-    would_create = 0
-    skipped = 0
-    errors: list[str] = []
-
-    for o in ozon_orders:
         if (o.get("order_tags") or {}).get("is_virtual"):
             skipped += 1
             continue
@@ -263,14 +231,70 @@ def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict
             continue
 
         payload = build_customerorder_payload(account_name, o, ms_pos)
-        would_create += 1
+        name = payload.get("name")
 
-        logger.info(
-            "[DRY][%s] Would create CustomerOrder: name=%s positions=%s order_id=%s",
-            account_name,
-            payload.get("name"),
-            len(payload.get("positions") or []),
-            o.get("order_id"),
-        )
+        if mode == "DRY":
+            would_create += 1
+            logger.info(
+                "[DRY][%s] Would create CustomerOrder: name=%s positions=%s order_id=%s",
+                account_name,
+                name,
+                len(payload.get("positions") or []),
+                o.get("order_id"),
+            )
+            continue
 
-    return {"mode": mode, "would_create": would_create, "skipped": skipped, "errors_count": len(errors), "errors": errors[:50]}
+        if mode != "LIVE":
+            raise RuntimeError(f"Unknown MS_MODE={mode}. Use DRY or LIVE")
+
+        # стоп-кран для LIVE
+        if max_live > 0 and created >= max_live:
+            logger.info("[%s] Reached MS_LIVE_MAX=%s, stopping.", account_name, max_live)
+            break
+
+        # анти-дубли (только в LIVE, чтобы DRY не грузил МС лишними запросами)
+        try:
+            existing = _find_customerorder_by_name(ms, str(name))
+        except Exception as e:
+            errors.append(f'order_id={o.get("order_id")}: cannot check duplicate: {e}')
+            continue
+
+        if existing:
+            duplicates += 1
+            logger.info("[%s] Skip duplicate CustomerOrder name=%s order_id=%s",
+                        account_name, name, o.get("order_id"))
+            continue
+
+        try:
+            created_doc = _create_customerorder(ms, payload)
+            created += 1
+            logger.info("[%s] Created CustomerOrder: name=%s id=%s order_id=%s",
+                        account_name, name, created_doc.get("id"), o.get("order_id"))
+        except Exception as e:
+            errors.append(f'order_id={o.get("order_id")}: create failed: {e}')
+
+    return {
+        "mode": mode,
+        "created": created,
+        "would_create": would_create,
+        "skipped": skipped,
+        "duplicates": duplicates,
+        "errors_count": len(errors),
+        "errors": errors[:50],
+    }
+
+
+def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
+    """
+    Совместимость со старым импортом.
+    Всегда форсит DRY.
+    """
+    old = os.getenv("MS_MODE")
+    os.environ["MS_MODE"] = "DRY"
+    try:
+        return sync_orders_to_ms(ozon_client, account_name, ozon_orders)
+    finally:
+        if old is None:
+            os.environ.pop("MS_MODE", None)
+        else:
+            os.environ["MS_MODE"] = old
