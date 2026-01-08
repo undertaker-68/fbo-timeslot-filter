@@ -186,32 +186,84 @@ def ozon_positions_from_bundle(ozon_client, order: dict) -> list[dict]:
 
 
 def build_customerorder_payload(account_name: str, order: dict, ms_positions: list[dict]) -> dict[str, Any]:
+    # обязательные справочники из ENV
+    org_id = os.getenv("MS_ORGANIZATION_ID", "").strip()
+    agent_id = os.getenv("MS_AGENT_ID", "").strip()
+    store_id = os.getenv("MS_STORE_ID", "").strip()
+    state_id = os.getenv("MS_STATE_ID", "").strip()
+    saleschannel_id = (os.getenv(f"MS_SALESCHANNEL_ID_{account_name}", "") or os.getenv("MS_SALESCHANNEL_ID", "")).strip()
+
+    if not org_id:
+        raise RuntimeError("MS_ORGANIZATION_ID не задан в .env")
+    if not agent_id:
+        raise RuntimeError("MS_AGENT_ID не задан в .env")
+    if not store_id:
+        raise RuntimeError("MS_STORE_ID не задан в .env")
+    if not state_id:
+        raise RuntimeError("MS_STATE_ID не задан в .env")
+    if not saleschannel_id:
+        raise RuntimeError("MS_SALESCHANNEL_ID_<ACCOUNT> не задан (например MS_SALESCHANNEL_ID_OZON_1)")
+
     order_number = (order.get("order_number") or "").strip()
     order_id = order.get("order_id")
 
-    # Короткий комментарий
+    # имя заказа
+    name_prefix = os.getenv("MS_NAME_PREFIX", "fbo-")
+    name = f"{name_prefix}{order_number}"
+
+    # короткий комментарий: "номер - город"
     city = destination_city(order)
-    if city:
-        descr = f"{order_number} - {city}"
-    else:
-        descr = f"{order_number}"
+    descr = f"{order_number} - {city}" if city else f"{order_number}"
 
     payload: dict[str, Any] = {
-        "name": f"fbo-{order_number}",
+        "name": name,
         "description": descr,
-        # удобно для дедупликации (по желанию можно проверять и не создавать дубль)
         "externalCode": f"{account_name}:{order_id}",
+
+        "organization": {
+            "meta": {
+                "href": f"https://api.moysklad.ru/api/remap/1.2/entity/organization/{org_id}",
+                "type": "organization",
+                "mediaType": "application/json",
+            }
+        },
+        "agent": {
+            "meta": {
+                "href": f"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/{agent_id}",
+                "type": "counterparty",
+                "mediaType": "application/json",
+            }
+        },
+        "store": {
+            "meta": {
+                "href": f"https://api.moysklad.ru/api/remap/1.2/entity/store/{store_id}",
+                "type": "store",
+                "mediaType": "application/json",
+            }
+        },
+        "state": {
+            "meta": {
+                "href": f"https://api.moysklad.ru/api/remap/1.2/entity/state/{state_id}",
+                "type": "state",
+                "mediaType": "application/json",
+            }
+        },
+        "salesChannel": {
+            "meta": {
+                "href": f"https://api.moysklad.ru/api/remap/1.2/entity/saleschannel/{saleschannel_id}",
+                "type": "saleschannel",
+                "mediaType": "application/json",
+            }
+        },
+
         "positions": ms_positions,
     }
 
     dm = planned_delivery_moment(order)
     if dm:
-        payload["deliveryPlannedMoment"] = dm  # поле МС для плановой даты отгрузки :contentReference[oaicite:2]{index=2}
+        payload["deliveryPlannedMoment"] = dm
 
-    # Остальные поля (organization/agent/store/state/salesChannel и т.д.)
-    # у тебя уже задаются в коде ниже или в ENV — оставляем как было, если оно уже есть.
     return payload
-
 
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
