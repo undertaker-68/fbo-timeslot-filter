@@ -205,84 +205,95 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     kit_rules = load_kit_rules()
 
     created = 0
-    would_create = 0
     skipped = 0
     duplicates = 0
     errors: list[str] = []
 
+    # кеш, чтобы меньше долбить МС (и меньше ловить 429)
+    assortment_cache: dict[str, dict] = {}
+
     for o in ozon_orders:
+        # стоп-кран для LIVE
+        if mode == "LIVE" and max_live > 0 and created >= max_live:
+            logger.info("[%s] Reached MS_LIVE_MAX=%s, stopping.", account_name, max_live)
+            break
+
         # пропускаем виртуальные
         if (o.get("order_tags") or {}).get("is_virtual"):
             skipped += 1
             continue
 
+        # 1) позиции из Ozon bundle
         oz_pos = ozon_positions_from_bundle(ozon_client, o)
         if not oz_pos:
             skipped += 1
             continue
 
+        # 2) разворот комплектов по правилам
         oz_pos = apply_kit_rules(oz_pos, kit_rules)
 
-        ms_pos, errs = build_ms_positions(ms, oz_pos)
-        if errs:
-            errors.append(f'order_id={o.get("order_id")}: ' + "; ".join(errs))
-        if not ms_pos:
+        # 3) сопоставление article -> meta в МС (с кешем)
+        ms_positions: list[dict] = []
+        local_errs: list[str] = []
+        for p in oz_pos:
+            art = p["article"]
+            qty = p["quantity"]
+
+            meta = assortment_cache.get(art)
+            if meta is None:
+                meta = ms.find_assortment_by_article(art)
+                if meta:
+                    assortment_cache[art] = meta
+
+            if not meta:
+                local_errs.append(f'not found in MS by article="{art}"')
+                continue
+
+            ms_positions.append({"assortment": meta, "quantity": qty})
+
+        if local_errs:
+            errors.append(f'order_id={o.get("order_id")}: ' + "; ".join(local_errs))
+
+        if not ms_positions:
             skipped += 1
             continue
 
-        payload = build_customerorder_payload(account_name, o, ms_pos)
-        name = payload.get("name")
+        # 4) payload
+        payload = build_customerorder_payload(account_name, o, ms_positions)
 
+        # 5) DRY/LIVE
         if mode == "DRY":
-            would_create += 1
+            created += 1
             logger.info(
                 "[DRY][%s] Would create CustomerOrder: name=%s positions=%s order_id=%s",
                 account_name,
-                name,
+                payload.get("name"),
                 len(payload.get("positions") or []),
                 o.get("order_id"),
             )
             continue
 
-        if mode != "LIVE":
-            raise RuntimeError(f"Unknown MS_MODE={mode}. Use DRY or LIVE")
-
-        # стоп-кран для LIVE
-        if max_live > 0 and created >= max_live:
-            logger.info("[%s] Reached MS_LIVE_MAX=%s, stopping.", account_name, max_live)
-            break
-
-        # анти-дубли (только в LIVE, чтобы DRY не грузил МС лишними запросами)
-        try:
-            existing = _find_customerorder_by_name(ms, str(name))
-        except Exception as e:
-            errors.append(f'order_id={o.get("order_id")}: cannot check duplicate: {e}')
-            continue
-
-        if existing:
-            duplicates += 1
-            logger.info("[%s] Skip duplicate CustomerOrder name=%s order_id=%s",
-                        account_name, name, o.get("order_id"))
-            continue
-
-        try:
-            created_doc = _create_customerorder(ms, payload)
+        if mode == "LIVE":
+            created_doc = ms.create_customerorder(payload)
             created += 1
-            logger.info("[%s] Created CustomerOrder: name=%s id=%s order_id=%s",
-                        account_name, name, created_doc.get("id"), o.get("order_id"))
-        except Exception as e:
-            errors.append(f'order_id={o.get("order_id")}: create failed: {e}')
+            logger.info(
+                "[%s] Created CustomerOrder: name=%s id=%s",
+                account_name,
+                payload.get("name"),
+                (created_doc.get("id") if isinstance(created_doc, dict) else None),
+            )
+            continue
+
+        raise RuntimeError(f"Unknown MS_MODE={mode}")
 
     return {
         "mode": mode,
-        "created": created,
-        "would_create": would_create,
+        "created_or_would_create": created,
         "skipped": skipped,
         "duplicates": duplicates,
         "errors_count": len(errors),
         "errors": errors[:50],
     }
-
 
 def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
