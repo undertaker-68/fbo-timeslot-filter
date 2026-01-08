@@ -106,34 +106,33 @@ class MSClient:
         return self.post("/entity/customerorder", payload)
 
     def find_assortment_by_article(self, article: str) -> dict | None:
-        """
-        Ищем в /entity/assortment по article (с учётом лат/кир гомоглифов).
-        Возвращаем meta или None.
-        С кэшем, чтобы не бить МС сотни раз одним и тем же артикулом.
-        """
-        article = (article or "").strip()
-        if not article:
-            return None
-
-        if article in self._article_cache:
-            return self._article_cache[article]
-
-        # пробуем варианты (лат/кир)
-        for a in variants_lat_cyr(article):
-            # кэш на конкретный вариант тоже полезен
-            if a in self._article_cache:
-                meta = self._article_cache[a]
-                self._article_cache[article] = meta
-                return meta
-
-            data = self.get("/entity/assortment", params={"filter": f"article={a}", "limit": 1})
-            rows = data.get("rows") or []
-            meta = rows[0].get("meta") if rows else None
-
-            self._article_cache[a] = meta
-            if meta:
-                self._article_cache[article] = meta
-                return meta
-
-        self._article_cache[article] = None
+    """
+    Ищем в /entity/assortment по article (с учётом лат/кир гомоглифов).
+    Возвращаем ПОЛНУЮ строку rows[0] (включая meta и salePrices), либо None.
+    С кэшем, чтобы не бить МС сотни раз одним и тем же артикулом.
+    """
+    article = (article or "").strip()
+    if not article:
         return None
+
+    if article in self._article_cache:
+        return self._article_cache[article]
+
+    # пробуем варианты (лат/кир)
+    for a in variants_lat_cyr(article):
+        if a in self._article_cache:
+            row = self._article_cache[a]
+            self._article_cache[article] = row
+            return row
+
+        data = self.get("/entity/assortment", params={"filter": f"article={a}", "limit": 1})
+        rows = data.get("rows") or []
+        row = rows[0] if rows else None
+
+        self._article_cache[a] = row
+        if row:
+            self._article_cache[article] = row
+            return row
+
+    self._article_cache[article] = None
+    return None
