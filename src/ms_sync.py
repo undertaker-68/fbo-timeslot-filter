@@ -318,25 +318,11 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             if art in assortment_cache:
                 meta, price_val = assortment_cache[art]
             else:
-                # ВАЖНО: ms.find_assortment_by_article должен возвращать ПОЛНУЮ строку (а не только meta),
-                # чтобы мы могли вытащить salePrices.
                 row = ms.find_assortment_by_article(art)
-                if row:
-                    # row может быть meta (старое поведение) или полная сущность.
-                    if "meta" in row and isinstance(row.get("meta"), dict) and len(row.keys()) > 1:
-                        meta = {"meta": row["meta"]} if "href" in row["meta"] else row["meta"]
-                        price_val = choose_sale_price_value(row)
-                    else:
-                        # если вернули только meta
-                        meta = row
-                        price_val = None
-
-                if meta:
+                if row and isinstance(row.get("meta"), dict):
+                    meta = row["meta"]              # <-- ВАЖНО: чистая meta
+                    price_val = choose_sale_price_value(row)  # <-- из salePrices
                     assortment_cache[art] = (meta, price_val)
-
-            if not meta:
-                local_errs.append(f'not found in MS by article="{art}"')
-                continue
 
             ass = _ensure_assortment_meta(meta)
             if not ass:
