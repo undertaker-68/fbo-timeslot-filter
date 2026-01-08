@@ -44,6 +44,29 @@ def planned_delivery_moment(order: dict) -> Optional[str]:
     except Exception:
         return None
 
+def _ensure_assortment_meta(x: dict | None) -> dict | None:
+    """
+    На вход может прийти:
+      - meta: {"href": "...", "type": "...", "mediaType": "..."}
+      - объект: {"meta": {...}, ...}
+      - уже обёрнутый: {"meta": {...}}
+    На выходе ВСЕГДА: {"meta": {...}} или None
+    """
+    if not x or not isinstance(x, dict):
+        return None
+
+    if "meta" in x and isinstance(x.get("meta"), dict):
+        meta = x["meta"]
+    else:
+        meta = x
+
+    if not isinstance(meta, dict):
+        return None
+
+    if not meta.get("href") or not meta.get("type"):
+        return None
+
+    return {"meta": meta}
 
 def destination_city(order: dict) -> str:
     """
@@ -194,6 +217,7 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     DRY: только логируем что бы создали
     LIVE: реально создаём (ограничиваем MS_LIVE_MAX)
     """
+    attempted = 0
     mode = (os.getenv("MS_MODE") or "DRY").upper()
     max_live = int(os.getenv("MS_LIVE_MAX", "0") or "0")
 
@@ -213,6 +237,10 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
         if (o.get("order_tags") or {}).get("is_virtual"):
             skipped += 1
             continue
+
+        if mode == "LIVE" and max_live > 0 and attempted >= max_live:
+            logger.info("[%s] Reached MS_LIVE_MAX=%s (attempted), stopping.", account_name, max_live)
+            break
 
         if mode == "LIVE" and max_live > 0 and created >= max_live:
             logger.info("[%s] Reached MS_LIVE_MAX=%s, stopping.", account_name, max_live)
@@ -261,7 +289,13 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
                 local_errs.append(f'not found in MS by article="{art}"')
                 continue
 
-            pos = {"assortment": meta, "quantity": qty}
+            ass = _ensure_assortment_meta(meta)
+            if not ass:
+                local_errs.append(f'bad assortment meta for article="{art}"')
+                continue
+
+            pos = {"assortment": ass, "quantity": qty}
+
             if isinstance(price_val, int):
                 pos["price"] = price_val  # цена в "копейках/центах" :contentReference[oaicite:3]{index=3}
             ms_positions.append(pos)
@@ -289,6 +323,7 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
 
         # LIVE
         try:
+            attempted += 1
             created_doc = ms.create_customerorder(payload)
             created += 1
             logger.info(
@@ -308,6 +343,7 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
         "skipped": skipped,
         "duplicates": duplicates,
         "errors": errors,
+        "attempted": attempted,
     }
 
 
