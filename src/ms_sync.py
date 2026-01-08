@@ -93,33 +93,32 @@ def destination_city(order: dict) -> str:
 
 def choose_sale_price_value(assortment_row: dict) -> Optional[int]:
     """
-    Пытаемся взять цену продажи по умолчанию из карточки ассортимента.
-    В МС цена обычно хранится как int (в копейках/центах).
+    Берём цену из salePrices по типу цены MS_PRICE_TYPE_NAME (по умолчанию 'Цена продажи').
+    Возвращаем int (копейки/центы) или None.
     """
-    # 1) Часто в ответе есть salePrices: [{"value": 12300, "priceType": {...}}, ...]
+    want = (os.getenv("MS_PRICE_TYPE_NAME") or "Цена продажи").strip().lower()
+
     sps = assortment_row.get("salePrices")
     if isinstance(sps, list) and sps:
-        # пробуем найти "Цена продажи" / "Продажа" по названию типа цены
         best = None
+
+        # 1) строго по названию типа цены
         for x in sps:
             pt = (x.get("priceType") or {})
-            nm = (pt.get("name") or "").lower()
-            if "продаж" in nm:
+            nm = (pt.get("name") or "").strip().lower()
+            if nm == want:
                 best = x
                 break
+
+        # 2) fallback: если вдруг не нашли — берём первую цену
         if best is None:
             best = sps[0]
+
         v = best.get("value")
         if isinstance(v, int) and v >= 0:
             return v
 
-    # 2) На всякий: иногда кладут просто "price"
-    v2 = assortment_row.get("price")
-    if isinstance(v2, int) and v2 >= 0:
-        return v2
-
     return None
-
 
 def load_kit_rules() -> dict[str, list[str]]:
     """
