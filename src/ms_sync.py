@@ -31,16 +31,17 @@ def _tz() -> Any:
 
 def planned_delivery_moment(order: dict) -> Optional[str]:
     """
-    МС: deliveryPlannedMoment (ISO)
+    МС: deliveryPlannedMoment
+    Формат МС: 'YYYY-MM-DD HH:MM:SS.mmm' (без 'T' и без 'Z')
     Нам важна ДАТА по таймслоту (локальная), время не важно.
-    Делаем YYYY-MM-DDT00:00:00.000Z
+    Ставим 00:00:00.000
     """
     try:
         ts_from = (((order.get("timeslot") or {}).get("timeslot") or {}).get("from")) or ""
         dt_utc = _parse_dt(ts_from)
         dt_local = dt_utc.astimezone(_tz())
         d = dt_local.date().isoformat()
-        return f"{d}T00:00:00.000Z"
+        return f"{d} 00:00:00.000"
     except Exception:
         return None
 
@@ -240,10 +241,6 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
 
         if mode == "LIVE" and max_live > 0 and attempted >= max_live:
             logger.info("[%s] Reached MS_LIVE_MAX=%s (attempted), stopping.", account_name, max_live)
-            break
-
-        if mode == "LIVE" and max_live > 0 and created >= max_live:
-            logger.info("[%s] Reached MS_LIVE_MAX=%s, stopping.", account_name, max_live)
             break
 
         # 1) получить позиции из Ozon bundle
