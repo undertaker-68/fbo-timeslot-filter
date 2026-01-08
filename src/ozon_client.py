@@ -20,10 +20,16 @@ def _raise_for_status_with_body(r: requests.Response, name: str):
         ) from e
 
 
-def _post_with_retry(session: requests.Session, url: str, name: str, payload: dict, max_attempts: int = 7) -> requests.Response:
+def _post_with_retry(
+    session: requests.Session,
+    url: str,
+    name: str,
+    payload: dict,
+    max_attempts: int = 7,
+) -> requests.Response:
     """
     Ретраи для 429 и 5xx (и сетевых ошибок).
-    Используем экспоненциальный backoff + небольшой jitter.
+    Экспоненциальный backoff + jitter.
     """
     last_exc = None
     for attempt in range(1, max_attempts + 1):
@@ -71,12 +77,14 @@ class OzonClient:
         self.api_key = api_key
 
         self.session = requests.Session()
-        self.session.headers.update({
-            "Client-Id": self.client_id,
-            "Api-Key": self.api_key,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        })
+        self.session.headers.update(
+            {
+                "Client-Id": self.client_id,
+                "Api-Key": self.api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        )
 
     def supply_order_list(self, payload: dict) -> dict:
         url = f"{BASE_URL}/v3/supply-order/list"
@@ -86,45 +94,49 @@ class OzonClient:
     def supply_order_get(self, order_ids: list[int]) -> dict:
         url = f"{BASE_URL}/v3/supply-order/get"
         r = _post_with_retry(self.session, url, self.name, {"order_ids": order_ids})
-        # легкая пауза, чтобы не ловить per-second limit на длинных сериях батчей
+        # пауза, чтобы не ловить per-second limit
         time.sleep(0.15)
         return r.json()
 
-def supply_order_bundle_items(self, bundle_id: str, limit: int = 100) -> list[dict]:
-    # Ozon принимает limit только (0, 100]
-    limit = max(1, min(int(limit or 100), 100))
+    def supply_order_bundle_items(self, bundle_id: str, limit: int = 100) -> list[dict]:
+        """
+        /v1/supply-order/bundle:
+          limit должен быть строго (0, 100]
+        Возвращаем упрощённый список: [{offer_id, quantity}, ...]
+        """
+        limit = max(1, min(int(limit or 100), 100))
 
-    url = "https://api-seller.ozon.ru/v1/supply-order/bundle"
-    items = []
-    last_id = ""
+        url = f"{BASE_URL}/v1/supply-order/bundle"
+        items: list[dict] = []
+        last_id = ""
 
-    while True:
-        payload = {
-            "bundle_ids": [bundle_id],
-            "limit": limit,
-        }
-        if last_id:
-            payload["last_id"] = last_id
+        while True:
+            payload = {"bundle_ids": [bundle_id], "limit": limit}
+            if last_id:
+                payload["last_id"] = last_id
 
-        r = self._post(url, payload)
-        data = r.json()
+            r = _post_with_retry(self.session, url, self.name, payload)
+            data = r.json() or {}
 
-        items.extend(data.get("items", []))
-        if not data.get("has_next"):
-            break
+            items.extend(data.get("items", []) or [])
+            if not data.get("has_next"):
+                break
 
-        last_id = data.get("last_id") or ""
-        if not last_id:
-            break
+            last_id = data.get("last_id") or ""
+            if not last_id:
+                break
 
-    return items
+            time.sleep(0.05)
+
+        return [{"offer_id": x.get("offer_id"), "quantity": x.get("quantity")} for x in items]
+
 
 def iter_accounts(prefix: str = "OZON", max_accounts: int = 20):
     """
     Ожидаем переменные вида:
       OZON_CLIENT_ID_1, OZON_API_KEY_1
       OZON_CLIENT_ID_2, OZON_API_KEY_2
-    ...
+      ...
     """
     for i in range(1, max_accounts + 1):
         cid = os.getenv(f"{prefix}_CLIENT_ID_{i}")
