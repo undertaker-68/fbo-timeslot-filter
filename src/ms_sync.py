@@ -173,7 +173,7 @@ def build_ms_positions(ms: MSClient, ozon_positions: list[dict]) -> tuple[list[d
             continue
 
         ms_positions.append({
-            "assortment": {"meta": meta} if "meta" not in meta else meta,
+            "assortment": {"meta": meta},
             "quantity": qty,
         })
 
