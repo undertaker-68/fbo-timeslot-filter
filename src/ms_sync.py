@@ -178,6 +178,11 @@ def build_ms_positions(ms: MSClient, ozon_positions: list[dict]) -> tuple[list[d
     return ms_positions, errors
 
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
+    max_live = int(os.getenv("MS_LIVE_MAX", "0") or "0")
+    if mode == "LIVE" and max_live > 0 and created >= max_live:
+        logger.info("[%s] Reached MS_LIVE_MAX=%s, stopping.", account_name, max_live)
+        break
+
     mode = (os.getenv("MS_MODE") or "DRY").upper()
     ms = MSClient()
     kit_rules = load_kit_rules()
