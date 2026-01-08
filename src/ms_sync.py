@@ -51,7 +51,6 @@ def _ensure_assortment_meta(x: dict | None) -> dict | None:
     На вход может прийти:
       - meta: {"href": "...", "type": "...", "mediaType": "..."}
       - объект: {"meta": {...}, ...}
-      - уже обёрнутый: {"meta": {...}}
     На выходе ВСЕГДА: {"meta": {...}} или None
     """
     if not x or not isinstance(x, dict):
@@ -129,7 +128,6 @@ def apply_kit_rules(positions: list[dict], kit_rules: dict[str, list[str]]) -> l
     if not kit_rules:
         return positions
 
-    # индекс правил по всем вариантам лат/кир
     index: dict[str, list[str]] = {}
     for kit, comps in kit_rules.items():
         for v in variants_lat_cyr(kit):
@@ -159,7 +157,6 @@ def ozon_positions_from_bundle(ozon_client, order: dict) -> list[dict]:
     if not bundle_id:
         return []
 
-    # в ozon_client должен быть метод supply_order_bundle_items(bundle_id, limit=100)
     items = ozon_client.supply_order_bundle_items(bundle_id, limit=100)
 
     out: list[dict] = []
@@ -171,8 +168,34 @@ def ozon_positions_from_bundle(ozon_client, order: dict) -> list[dict]:
     return out
 
 
+def _extract_sale_price_value(row: dict, *, price_type_href: str, price_type_name: str) -> Optional[int]:
+    """
+    Берём цену из row['salePrices'] по priceType (href или name).
+    Возвращаем int value (в копейках/минимальных единицах МС).
+    """
+    sale_prices = row.get("salePrices") or []
+    for sp in sale_prices:
+        pt = sp.get("priceType") or {}
+        pt_meta = pt.get("meta") or {}
+        href = (pt_meta.get("href") or "").strip()
+        name = (pt.get("name") or "").strip()
+
+        if price_type_href and href == price_type_href:
+            try:
+                return int(float(sp.get("value") or 0))
+            except Exception:
+                return None
+
+        if (not price_type_href) and price_type_name and name == price_type_name:
+            try:
+                return int(float(sp.get("value") or 0))
+            except Exception:
+                return None
+
+    return None
+
+
 def build_customerorder_payload(account_name: str, order: dict, ms_positions: list[dict]) -> dict[str, Any]:
-    # обязательные справочники из ENV
     org_id = os.getenv("MS_ORGANIZATION_ID", "").strip()
     agent_id = os.getenv("MS_AGENT_ID", "").strip()
     store_id = os.getenv("MS_STORE_ID", "").strip()
@@ -193,11 +216,9 @@ def build_customerorder_payload(account_name: str, order: dict, ms_positions: li
     order_number = (order.get("order_number") or "").strip()
     order_id = order.get("order_id")
 
-    # имя заказа
-    name_prefix = os.getenv("MS_NAME_PREFIX", "fbo-")
+    name_prefix = (os.getenv("MS_NAME_PREFIX") or "fbo-").strip()
     name = f"{name_prefix}{order_number}"
 
-    # короткий комментарий: "номер - город"
     city = destination_city(order)
     descr = f"{order_number} - {city}" if city else f"{order_number}"
 
@@ -245,27 +266,14 @@ def build_customerorder_payload(account_name: str, order: dict, ms_positions: li
         "positions": ms_positions,
     }
 
-    # deliveryPlannedMoment из таймслота
     dm = planned_delivery_moment(order)
     if dm:
         payload["deliveryPlannedMoment"] = dm
 
-    # !!! КЛЮЧЕВОЕ: priceType "Цена продажи"
-    # Чтобы МС сам подставил цены в позициях по типу цен "Цена продажи"
-    price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
-    if price_type_href:
-        payload["priceType"] = {
-            "meta": {
-                "href": price_type_href,
-                "type": "pricetype",
-                "mediaType": "application/json",
-            }
-        }
-
-    # === PRICE TYPE (ОБЯЗАТЕЛЬНО) ===
+    # priceType обязателен, но даже с ним цену всё равно кладём в позиции (см. выше).
     price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
     if not price_type_href:
-        raise RuntimeError("MS_PRICE_TYPE_HREF not set")
+        raise RuntimeError("MS_PRICE_TYPE_HREF не задан в .env (href типа цен 'Цена продажи')")
 
     payload["priceType"] = {
         "meta": {
@@ -274,11 +282,13 @@ def build_customerorder_payload(account_name: str, order: dict, ms_positions: li
             "mediaType": "application/json",
         }
     }
+
     return payload
+
 
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
-    DRY: только логируем что бы создали
+    DRY: логируем что бы создали
     LIVE: реально создаём (ограничиваем MS_LIVE_MAX)
     """
     attempted = 0
@@ -293,8 +303,11 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     duplicates = 0
     errors: list[str] = []
 
-    # cache: article -> meta
+    # кэш: article -> row (полный row из /entity/assortment)
     assortment_cache: dict[str, dict] = {}
+
+    price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
+    price_type_name = (os.getenv("MS_PRICE_TYPE_NAME") or "Цена продажи").strip()
 
     for o in ozon_orders:
         # пропускаем виртуальные
@@ -306,39 +319,55 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             logger.info("[%s] Reached MS_LIVE_MAX=%s (attempted), stopping.", account_name, max_live)
             break
 
-        # 1) позиции из Ozon bundle
         oz_pos = ozon_positions_from_bundle(ozon_client, o)
         if not oz_pos:
             skipped += 1
             continue
 
-        # 2) развернуть комплекты
         oz_pos = apply_kit_rules(oz_pos, kit_rules)
 
-        # 3) собрать позиции МС: assortment meta + quantity
-        # !!! ВАЖНО: НЕ передаём price вообще. Цена будет взята из priceType ("Цена продажи") в документе.
         ms_positions: list[dict] = []
         local_errs: list[str] = []
 
         for p in oz_pos:
-            art = p["article"]
-            qty = p["quantity"]
+            art = (p.get("article") or "").strip()
+            qty = float(p.get("quantity") or 0)
 
-            meta: Optional[dict] = None
+            if not art or qty <= 0:
+                continue
+
+            row: Optional[dict] = None
             if art in assortment_cache:
-                meta = assortment_cache[art]
+                row = assortment_cache[art]
             else:
-                row = ms.find_assortment_by_article(art)
-                if row and isinstance(row.get("meta"), dict):
-                    meta = row["meta"]  # чистая meta
-                    assortment_cache[art] = meta
+                found = ms.find_assortment_by_article(art)
+                if found:
+                    row = found
+                    assortment_cache[art] = found
 
-            ass = _ensure_assortment_meta(meta)
+            if not row:
+                local_errs.append(f'not found in MS by article="{art}"')
+                continue
+
+            ass = _ensure_assortment_meta(row.get("meta"))
             if not ass:
                 local_errs.append(f'bad assortment meta for article="{art}"')
                 continue
 
-            ms_positions.append({"assortment": ass, "quantity": qty})
+            price_val = _extract_sale_price_value(
+                row,
+                price_type_href=price_type_href,
+                price_type_name=price_type_name,
+            )
+            if price_val is None or price_val <= 0:
+                local_errs.append(f'no sale price "{price_type_name}" for article="{art}"')
+                continue
+
+            ms_positions.append({
+                "assortment": ass,
+                "quantity": qty,
+                "price": price_val,
+            })
 
         if local_errs:
             errors.append(f'order_id={o.get("order_id")}: ' + "; ".join(local_errs))
@@ -362,13 +391,8 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             )
             continue
 
-        # LIVE
         try:
             attempted += 1
-            logger.info(
-                "DEBUG ORDER payload priceType=%s",
-                payload.get("priceType")
-            )
             created_doc = ms.create_customerorder(payload)
             created += 1
             logger.info(
