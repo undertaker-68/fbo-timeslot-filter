@@ -365,6 +365,10 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
         # LIVE
         try:
             attempted += 1
+            logger.info(
+                "DEBUG ORDER payload priceType=%s",
+                payload.get("priceType")
+            )
             created_doc = ms.create_customerorder(payload)
             created += 1
             logger.info(
