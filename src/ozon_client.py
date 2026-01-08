@@ -96,7 +96,7 @@ class OzonClient:
         limit должен быть строго (0, 100]
         """
         # clamp 1..100
-        limit = min(max(int(limit), 1), 100)
+         limit = max(1, min(int(limit or 100), 100))
 
         url = f"{BASE_URL}/v1/supply-order/bundle"
         items: list[dict] = []
