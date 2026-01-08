@@ -262,8 +262,19 @@ def build_customerorder_payload(account_name: str, order: dict, ms_positions: li
             }
         }
 
-    return payload
+    # === PRICE TYPE (ОБЯЗАТЕЛЬНО) ===
+    price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
+    if not price_type_href:
+        raise RuntimeError("MS_PRICE_TYPE_HREF not set")
 
+    payload["priceType"] = {
+        "meta": {
+            "href": price_type_href,
+            "type": "pricetype",
+            "mediaType": "application/json",
+        }
+    }
+    return payload
 
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
