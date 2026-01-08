@@ -1,18 +1,10 @@
 import os
-from typing import Any
+import re
+from datetime import datetime, time
+from typing import Any, Optional
 
 from .logger import logger
 from .ms_client import MSClient, variants_lat_cyr
-
-
-def _ms_meta(entity: str, entity_id: str) -> dict:
-    return {
-        "meta": {
-            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/{entity}/{entity_id}",
-            "type": entity,
-            "mediaType": "application/json",
-        }
-    }
 
 
 def load_ms_required(name: str) -> str:
@@ -60,6 +52,64 @@ def resolve_saleschannel_id(account_name: str) -> str:
     raise RuntimeError("Не задан канал продаж: MS_SALESCHANNEL_ID_OZON_1/2 (или общий MS_SALESCHANNEL_ID)")
 
 
+def _extract_city_from_address(addr: str) -> str | None:
+    # ищем "г. Ярославль" / "г. Красноярск" и т.п.
+    if not addr:
+        return None
+    m = re.search(r"\bг\.\s*([^,]+)", addr)
+    if not m:
+        return None
+    city = (m.group(1) or "").strip()
+    return city or None
+
+
+def extract_city(ozon_order: dict) -> str | None:
+    wh = (ozon_order.get("drop_off_warehouse") or {})
+    addr = (wh.get("address") or "").strip()
+    city = _extract_city_from_address(addr)
+    return city
+
+
+def _parse_timeslot_from(ozon_order: dict) -> Optional[str]:
+    return (((ozon_order.get("timeslot") or {}).get("timeslot") or {}).get("from"))
+
+
+def _shipment_planned_moment(ozon_order: dict) -> str | None:
+    """
+    В MS для CustomerOrder используем shipmentPlannedMoment.
+    Нам нужна только дата — время фиксируем (по умолчанию 12:00:00).
+    Формат MS: "YYYY-MM-DD HH:MM:SS"
+    """
+    ts = _parse_timeslot_from(ozon_order)
+    if not ts:
+        return None
+
+    tz_name = os.getenv("TIMEZONE", "Asia/Krasnoyarsk")
+    hour = int(os.getenv("MS_PLANNED_HOUR", "12") or "12")
+
+    # Вход: 2026-01-07T11:00:00Z
+    # Локальная дата в нужной TZ
+    try:
+        # python 3.11/3.12: fromisoformat не любит Z, заменим на +00:00
+        ts2 = ts.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(ts2)
+
+        # безопасно: ZoneInfo есть в stdlib
+        from zoneinfo import ZoneInfo  # type: ignore
+
+        dt_local = dt_utc.astimezone(ZoneInfo(tz_name))
+        d = dt_local.date()
+        planned = datetime.combine(d, time(hour, 0, 0))
+        return planned.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        # если что-то пошло не так — хотя бы дату по строке
+        try:
+            d = ts[:10]
+            return f"{d} {hour:02d}:00:00"
+        except Exception:
+            return None
+
+
 def build_customerorder_payload(account_name: str, ozon_order: dict, ms_positions: list[dict]) -> dict:
     org_id = load_ms_required("MS_ORGANIZATION_ID")
     agent_id = load_ms_required("MS_AGENT_ID")
@@ -67,27 +117,37 @@ def build_customerorder_payload(account_name: str, ozon_order: dict, ms_position
     state_id = load_ms_required("MS_STATE_ID")
     saleschannel_id = resolve_saleschannel_id(account_name)
 
-    name_prefix = os.getenv("MS_NAME_PREFIX", "fbo-")
-    comment_prefix = os.getenv("MS_COMMENT_PREFIX", "Ozon FBO supply-order")
+    # имя: "2000039442141 - Ярославль" (+ опциональный префикс)
+    name_prefix = os.getenv("MS_NAME_PREFIX", "")  # по умолчанию БЕЗ fbo-
+    comment_prefix = os.getenv("MS_COMMENT_PREFIX", "Ozon FBO")
 
     order_id = ozon_order.get("order_id")
-    order_number = ozon_order.get("order_number")
-    timeslot_from = ((ozon_order.get("timeslot") or {}).get("timeslot") or {}).get("from")
+    order_number = ozon_order.get("order_number") or str(order_id)
+    city = extract_city(ozon_order)
+    name = f"{name_prefix}{order_number}{(' - ' + city) if city else ''}"
+
+    shipment_planned = _shipment_planned_moment(ozon_order)
 
     payload = {
-        "name": f"{name_prefix}{order_number or order_id}",  # без пробела
-        "organization": _ms_meta("organization", org_id),
-        "agent": _ms_meta("counterparty", agent_id),
-        "store": _ms_meta("store", store_id),
-        "state": _ms_meta("state", state_id),
-        "salesChannel": _ms_meta("saleschannel", saleschannel_id),
-        "description": (
-            f"{comment_prefix}. "
-            f"account={account_name}; order_id={order_id}; order_number={order_number}; "
-            f"state={ozon_order.get('state')}; timeslot_from={timeslot_from}"
-        ),
+        "name": name,
+        "organization": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/organization/{org_id}",
+                                  "type": "organization", "mediaType": "application/json"}},
+        "agent": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/{agent_id}",
+                           "type": "counterparty", "mediaType": "application/json"}},
+        "store": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/store/{store_id}",
+                           "type": "store", "mediaType": "application/json"}},
+        "state": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/state/{state_id}",
+                           "type": "state", "mediaType": "application/json"}},
+        "salesChannel": {"meta": {"href": f"https://api.moysklad.ru/api/remap/1.2/entity/saleschannel/{saleschannel_id}",
+                                  "type": "saleschannel", "mediaType": "application/json"}},
+        # коротко, без “простыни”
+        "description": f"{comment_prefix}; account={account_name}; order_id={order_id}; state={ozon_order.get('state')}",
         "positions": ms_positions,
     }
+
+    if shipment_planned:
+        payload["shipmentPlannedMoment"] = shipment_planned
+
     return payload
 
 
@@ -108,7 +168,9 @@ def ozon_positions_from_bundle(ozon_client, ozon_order: dict) -> list[dict]:
         logger.warning("Нет bundle_id у order_id=%s", ozon_order.get("order_id"))
         return []
 
+    # ВАЖНО: метод должен существовать в ozon_client.py
     items = ozon_client.supply_order_bundle_items(bundle_id)
+
     out: list[dict] = []
     for it in items:
         art = (it.get("offer_id") or "").strip()
@@ -152,19 +214,27 @@ def apply_kit_rules(positions: list[dict], kit_rules: dict[str, list[str]]) -> l
     return out
 
 
-def _find_customerorder_by_name(ms: MSClient, name: str) -> dict | None:
-    if hasattr(ms, "find_customerorder_by_name"):
-        return ms.find_customerorder_by_name(name)  # type: ignore[attr-defined]
+def _pick_sale_price_value(assortment_row: dict) -> int | None:
+    """
+    Берём цену продажи по умолчанию из salePrices.
+    Можно указать MS_PRICE_TYPE_NAME (по умолчанию 'Цена продажи').
+    Возвращает value (как в API МС), либо None.
+    """
+    want_name = (os.getenv("MS_PRICE_TYPE_NAME") or "Цена продажи").strip()
+    sale_prices = assortment_row.get("salePrices") or []
+    if not isinstance(sale_prices, list) or not sale_prices:
+        return None
 
-    data = ms.get("/entity/customerorder", params={"filter": f"name={name}", "limit": 1})
-    rows = data.get("rows") or []
-    return rows[0] if rows else None
+    # 1) пробуем по названию типа цены
+    for sp in sale_prices:
+        pt = (sp.get("priceType") or {})
+        if (pt.get("name") or "").strip() == want_name:
+            v = sp.get("value")
+            return int(v) if v is not None else None
 
-
-def _create_customerorder(ms: MSClient, payload: dict) -> dict:
-    if hasattr(ms, "create_customerorder"):
-        return ms.create_customerorder(payload)  # type: ignore[attr-defined]
-    return ms.post("/entity/customerorder", payload)
+    # 2) fallback: первая цена
+    v = sale_prices[0].get("value")
+    return int(v) if v is not None else None
 
 
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
@@ -179,8 +249,8 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     duplicates = 0
     errors: list[str] = []
 
-    # кеш meta по article, чтобы меньше долбить МС
-    assortment_cache: dict[str, dict] = {}
+    # кеш: article -> (meta_dict, price_value)
+    assortment_cache: dict[str, tuple[dict, int | None]] = {}
 
     for o in ozon_orders:
         # стоп-кран для LIVE
@@ -207,18 +277,34 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             art = p["article"]
             qty = p["quantity"]
 
-            meta = assortment_cache.get(art)
-            if meta is None:
-                meta = ms.find_assortment_by_article(art)
-                if meta:
-                    assortment_cache[art] = meta
+            cached = assortment_cache.get(art)
+            if cached is None:
+                # берём строку ассортимента, чтобы достать и meta, и salePrices
+                data = ms.get("/entity/assortment", params={"filter": f"article={art}", "limit": 1})
+                rows = data.get("rows") or []
+                row = rows[0] if rows else None
+                if not row:
+                    assortment_cache[art] = ({}, None)
+                    cached = ({}, None)
+                else:
+                    meta = row.get("meta") or {}
+                    price_val = _pick_sale_price_value(row)
+                    assortment_cache[art] = (meta, price_val)
+                    cached = (meta, price_val)
 
+            meta, price_val = cached
             if not meta:
                 local_errs.append(f'not found in MS by article="{art}"')
                 continue
 
-            # ✅ ВАЖНО: assortment должен содержать {"meta": ...}
-            ms_positions.append({"assortment": {"meta": meta}, "quantity": qty})
+            pos = {
+                "assortment": {"meta": meta},
+                "quantity": qty,
+            }
+            # цена обязательна для “цена продажи по умолчанию”
+            if price_val is not None:
+                pos["price"] = price_val
+            ms_positions.append(pos)
 
         if local_errs:
             errors.append(f'order_id={o.get("order_id")}: ' + "; ".join(local_errs))
@@ -241,15 +327,7 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             continue
 
         if mode == "LIVE":
-            # анти-дубли (лучше включить в LIVE)
-            existing = _find_customerorder_by_name(ms, str(payload.get("name")))
-            if existing:
-                duplicates += 1
-                logger.info("[%s] Skip duplicate CustomerOrder name=%s order_id=%s",
-                            account_name, payload.get("name"), o.get("order_id"))
-                continue
-
-            created_doc = _create_customerorder(ms, payload)
+            created_doc = ms.create_customerorder(payload)
             created += 1
             logger.info(
                 "[%s] Created CustomerOrder: name=%s id=%s",
