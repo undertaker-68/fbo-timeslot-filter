@@ -11,7 +11,6 @@ from .ms_client import MSClient, variants_lat_cyr
 
 
 def _parse_dt(s: str) -> datetime:
-    # "2026-01-07T11:00:00Z" -> aware UTC
     if not s:
         raise ValueError("empty datetime")
     if s.endswith("Z"):
@@ -31,10 +30,9 @@ def _tz() -> Any:
 
 def planned_delivery_moment(order: dict) -> Optional[str]:
     """
-    МС: deliveryPlannedMoment
-    Формат МС: 'YYYY-MM-DD HH:MM:SS.mmm' (без 'T' и без 'Z')
-    Нам важна ДАТА по таймслоту (локальная), время не важно.
-    Ставим 00:00:00.000
+    MS: deliveryPlannedMoment
+    Формат МС: 'YYYY-MM-DD HH:MM:SS.mmm'
+    Дата = локальная дата timeslot.from, время = 00:00:00.000
     """
     try:
         ts_from = (((order.get("timeslot") or {}).get("timeslot") or {}).get("from")) or ""
@@ -93,13 +91,7 @@ def destination_city(order: dict) -> str:
 
 def load_kit_rules() -> dict[str, list[str]]:
     """
-    Комплекты берём из ENV MS_KIT_RULES.
-
-    Формат:
-      MS_KIT_RULES=10264-А93:10264+11291;00020-А92:00020+11278
-
-    То есть:
-      <kit_article>:<component1>+<component2>[+...];<kit2>:...
+    MS_KIT_RULES=10264-А93:10264+11291;00020-А92:00020+11278
     """
     raw = (os.getenv("MS_KIT_RULES") or "").strip()
     if not raw:
@@ -171,7 +163,7 @@ def ozon_positions_from_bundle(ozon_client, order: dict) -> list[dict]:
 def _extract_sale_price_value(row: dict, *, price_type_href: str, price_type_name: str) -> Optional[int]:
     """
     Берём цену из row['salePrices'] по priceType (href или name).
-    Возвращаем int value (в копейках/минимальных единицах МС).
+    Возвращаем int value (в минимальных единицах МС).
     """
     sale_prices = row.get("salePrices") or []
     for sp in sale_prices:
@@ -217,6 +209,8 @@ def build_customerorder_payload(account_name: str, order: dict, ms_positions: li
     order_id = order.get("order_id")
 
     name_prefix = (os.getenv("MS_NAME_PREFIX") or "fbo-").strip()
+    if not name_prefix:
+        name_prefix = "fbo-"
     name = f"{name_prefix}{order_number}"
 
     city = destination_city(order)
@@ -270,26 +264,23 @@ def build_customerorder_payload(account_name: str, order: dict, ms_positions: li
     if dm:
         payload["deliveryPlannedMoment"] = dm
 
-    # priceType обязателен, но даже с ним цену всё равно кладём в позиции (см. выше).
     price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
-    if not price_type_href:
-        raise RuntimeError("MS_PRICE_TYPE_HREF не задан в .env (href типа цен 'Цена продажи')")
-
-    payload["priceType"] = {
-        "meta": {
-            "href": price_type_href,
-            "type": "pricetype",
-            "mediaType": "application/json",
+    if price_type_href:
+        payload["priceType"] = {
+            "meta": {
+                "href": price_type_href,
+                "type": "pricetype",
+                "mediaType": "application/json",
+            }
         }
-    }
 
     return payload
 
 
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
-    DRY: логируем что бы создали
-    LIVE: реально создаём (ограничиваем MS_LIVE_MAX)
+    DRY: логируем create/update
+    LIVE: create или update (upsert), MS_LIVE_MAX ограничивает attempted
     """
     attempted = 0
     mode = (os.getenv("MS_MODE") or "DRY").upper()
@@ -299,11 +290,12 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     kit_rules = load_kit_rules()
 
     created = 0
+    updated = 0
     skipped = 0
-    duplicates = 0
+    duplicates = 0  # оставим для совместимости, но теперь не используем как ошибку
     errors: list[str] = []
+    warnings: list[str] = []
 
-    # кэш: article -> row (полный row из /entity/assortment)
     assortment_cache: dict[str, dict] = {}
 
     price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
@@ -354,19 +346,20 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
                 local_errs.append(f'bad assortment meta for article="{art}"')
                 continue
 
+            # Цена: если не нашли — ставим 0 и это НЕ ошибка, только warning
             price_val = _extract_sale_price_value(
                 row,
                 price_type_href=price_type_href,
                 price_type_name=price_type_name,
             )
-            if price_val is None or price_val <= 0:
-                local_errs.append(f'no sale price "{price_type_name}" for article="{art}"')
-                continue
+            if price_val is None:
+                warnings.append(f'order_id={o.get("order_id")}: no sale price "{price_type_name}" for article="{art}" -> price=0')
+                price_val = 0
 
             ms_positions.append({
                 "assortment": ass,
                 "quantity": qty,
-                "price": price_val,
+                "price": int(price_val),
             })
 
         if local_errs:
@@ -377,56 +370,78 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             continue
 
         payload = build_customerorder_payload(account_name, o, ms_positions)
+        name = payload.get("name")
+
+        # ---------- UPSERT ----------
+        existing = None
+        try:
+            if name:
+                existing = ms.find_customerorder_by_name(name)
+        except Exception:
+            existing = None
 
         if mode == "DRY":
-            created += 1
-            logger.info(
-                "[DRY][%s] Would create CustomerOrder: name=%s positions=%s order_id=%s deliveryPlannedMoment=%s priceType=%s",
-                account_name,
-                payload.get("name"),
-                len(payload.get("positions") or []),
-                o.get("order_id"),
-                payload.get("deliveryPlannedMoment"),
-                (payload.get("priceType") or {}).get("meta", {}).get("href"),
-            )
+            if existing:
+                logger.info(
+                    "[DRY][%s] Would UPDATE CustomerOrder: name=%s positions=%s order_id=%s deliveryPlannedMoment=%s",
+                    account_name,
+                    name,
+                    len(payload.get("positions") or []),
+                    o.get("order_id"),
+                    payload.get("deliveryPlannedMoment"),
+                )
+            else:
+                logger.info(
+                    "[DRY][%s] Would CREATE CustomerOrder: name=%s positions=%s order_id=%s deliveryPlannedMoment=%s",
+                    account_name,
+                    name,
+                    len(payload.get("positions") or []),
+                    o.get("order_id"),
+                    payload.get("deliveryPlannedMoment"),
+                )
             continue
 
+        attempted += 1
+
         try:
-            attempted += 1
-            created_doc = ms.create_customerorder(payload)
-            created += 1
-            logger.info(
-                "[LIVE][%s] Created CustomerOrder: name=%s id=%s order_id=%s",
-                account_name,
-                created_doc.get("name"),
-                (created_doc.get("id") or (created_doc.get("meta") or {}).get("href")),
-                o.get("order_id"),
-            )
+            if existing:
+                ms_id = existing.get("id")
+                if not ms_id:
+                    # fallback: вытащим id из meta.href
+                    href = ((existing.get("meta") or {}).get("href") or "")
+                    ms_id = href.rsplit("/", 1)[-1] if href else None
+
+                if not ms_id:
+                    raise RuntimeError("Cannot determine MS customerorder id for update")
+
+                # 1) обновляем шапку (без positions)
+                hdr = dict(payload)
+                hdr.pop("positions", None)
+
+                ms.update_customerorder(ms_id, hdr)
+
+                # 2) перезаписываем позиции
+                ms.replace_customerorder_positions(ms_id, payload.get("positions") or [])
+
+                updated += 1
+                logger.info("[LIVE][%s] Updated CustomerOrder: name=%s id=%s order_id=%s", account_name, name, ms_id, o.get("order_id"))
+            else:
+                created_doc = ms.create_customerorder(payload)
+                created += 1
+                doc_id = created_doc.get("id") or ((created_doc.get("meta") or {}).get("href") or "")
+                logger.info("[LIVE][%s] Created CustomerOrder: name=%s id=%s order_id=%s", account_name, created_doc.get("name"), doc_id, o.get("order_id"))
+
         except Exception as e:
             errors.append(f'order_id={o.get("order_id")}: {e}')
-            logger.exception("[%s] create_customerorder error", account_name)
+            logger.exception("[%s] upsert customerorder error", account_name)
 
     return {
         "mode": mode,
         "created": created,
+        "updated": updated,
         "skipped": skipped,
         "duplicates": duplicates,
         "errors": errors,
+        "warnings": warnings,
         "attempted": attempted,
     }
-
-
-def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
-    """
-    Совместимость со старым импортом.
-    Всегда форсит DRY.
-    """
-    old = os.getenv("MS_MODE")
-    os.environ["MS_MODE"] = "DRY"
-    try:
-        return sync_orders_to_ms(ozon_client, account_name, ozon_orders)
-    finally:
-        if old is None:
-            os.environ.pop("MS_MODE", None)
-        else:
-            os.environ["MS_MODE"] = old
