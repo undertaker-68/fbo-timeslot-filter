@@ -46,10 +46,18 @@ class MSClient:
             "Accept": "application/json;charset=utf-8",
         })
 
-        # кэш: article -> meta (или None если не найдено)
+        # кэш: article -> row (или None если не найдено)
         self._article_cache: dict[str, dict | None] = {}
 
-    def _request_with_retry(self, method: str, url: str, *, params=None, json=None, max_attempts: int = 8) -> requests.Response:
+    def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        params=None,
+        json=None,
+        max_attempts: int = 8
+    ) -> requests.Response:
         last_exc = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -75,7 +83,7 @@ class MSClient:
                 if r.status_code >= 400:
                     raise RuntimeError(f"MS {method} {url} -> {r.status_code}: {(r.text or '')[:2000]}")
 
-                # чуть-чуть троттлим даже на успехе (чтобы меньше ловить 429)
+                # лёгкий троттлинг даже на успехе
                 time.sleep(0.03)
                 return r
 
@@ -91,19 +99,69 @@ class MSClient:
         r = self._request_with_retry("GET", url, params=params)
         return r.json()
 
-    def post(self, path: str, payload: dict) -> dict:
+    def post(self, path: str, payload) -> dict:
         url = f"{MS_BASE_URL}{path}"
         r = self._request_with_retry("POST", url, json=payload)
         return r.json()
 
+    def put(self, path: str, payload: dict) -> dict:
+        url = f"{MS_BASE_URL}{path}"
+        r = self._request_with_retry("PUT", url, json=payload)
+        return r.json()
+
+    def delete(self, path: str) -> dict:
+        url = f"{MS_BASE_URL}{path}"
+        r = self._request_with_retry("DELETE", url)
+        if r.text:
+            try:
+                return r.json()
+            except Exception:
+                return {"ok": True}
+        return {"ok": True}
+
+    # -------- CustomerOrder helpers --------
+
     def find_customerorder_by_name(self, name: str) -> dict | None:
-        # ищем ровно по имени
         data = self.get("/entity/customerorder", params={"filter": f"name={name}", "limit": 1})
         rows = data.get("rows") or []
         return rows[0] if rows else None
 
     def create_customerorder(self, payload: dict) -> dict:
         return self.post("/entity/customerorder", payload)
+
+    def update_customerorder(self, order_id: str, payload: dict) -> dict:
+        return self.put(f"/entity/customerorder/{order_id}", payload)
+
+    def get_customerorder_positions(self, order_id: str, limit: int = 1000) -> list[dict]:
+        data = self.get(f"/entity/customerorder/{order_id}/positions", params={"limit": limit})
+        return data.get("rows") or []
+
+    def delete_customerorder_position(self, order_id: str, position_id: str) -> None:
+        self.delete(f"/entity/customerorder/{order_id}/positions/{position_id}")
+
+    def replace_customerorder_positions(self, order_id: str, positions: list[dict]) -> None:
+        """
+        Перезапись состава:
+          1) удалить все текущие позиции
+          2) добавить новые позиции
+        """
+        current = self.get_customerorder_positions(order_id, limit=1000)
+        for p in current:
+            pid = p.get("id")
+            if pid:
+                self.delete_customerorder_position(order_id, pid)
+
+        if not positions:
+            return
+
+        # В МС иногда принимается либо массив позиций, либо {"positions": [...]}
+        try:
+            self.post(f"/entity/customerorder/{order_id}/positions", positions)
+            return
+        except Exception:
+            self.post(f"/entity/customerorder/{order_id}/positions", {"positions": positions})
+
+    # -------- Assortment by article --------
 
     def find_assortment_by_article(self, article: str) -> dict | None:
         """
