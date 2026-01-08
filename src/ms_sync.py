@@ -45,6 +45,7 @@ def planned_delivery_moment(order: dict) -> Optional[str]:
     except Exception:
         return None
 
+
 def _ensure_assortment_meta(x: dict | None) -> dict | None:
     """
     На вход может прийти:
@@ -69,6 +70,7 @@ def _ensure_assortment_meta(x: dict | None) -> dict | None:
 
     return {"meta": meta}
 
+
 def destination_city(order: dict) -> str:
     """
     Хотим: 'Ярославль' и т.п.
@@ -85,53 +87,38 @@ def destination_city(order: dict) -> str:
         head = name.split("_", 1)[0].strip()
         if not head:
             return ""
-        # "ЯРОСЛАВЛЬ" -> "Ярославль", "ПЕРМЬ" -> "Пермь"
         return head[:1].upper() + head[1:].lower()
     except Exception:
         return ""
 
 
-def choose_sale_price_value(assortment_row: dict) -> Optional[int]:
-    """
-    Берём цену из salePrices по типу цены MS_PRICE_TYPE_NAME (по умолчанию 'Цена продажи').
-    Возвращаем int (копейки/центы) или None.
-    """
-    want = (os.getenv("MS_PRICE_TYPE_NAME") or "Цена продажи").strip().lower()
-
-    sps = assortment_row.get("salePrices")
-    if isinstance(sps, list) and sps:
-        best = None
-
-        # 1) строго по названию типа цены
-        for x in sps:
-            pt = (x.get("priceType") or {})
-            nm = (pt.get("name") or "").strip().lower()
-            if nm == want:
-                best = x
-                break
-
-        # 2) fallback: если вдруг не нашли — берём первую цену
-        if best is None:
-            best = sps[0]
-
-        v = best.get("value")
-        if isinstance(v, int) and v >= 0:
-            return v
-
-    return None
-
 def load_kit_rules() -> dict[str, list[str]]:
     """
-    Комплекты: ключ=offer_id(артикул), value=[component_articles...]
-    Можно хранить в ENV как JSON, но пока проще жёстко/файлом.
+    Комплекты берём из ENV MS_KIT_RULES.
+
+    Формат:
+      MS_KIT_RULES=10264-А93:10264+11291;00020-А92:00020+11278
+
+    То есть:
+      <kit_article>:<component1>+<component2>[+...];<kit2>:...
     """
-    # Если захочешь — вынесем в JSON-файл или ENV.
-    return {
-        "10264-А93": ["10264", "11291"],
-        "00020-А92": ["00020", "11278"],
-        "00026-В92": ["00026", "11284"],
-        "00493-Е90": ["00493", "11287"],
-    }
+    raw = (os.getenv("MS_KIT_RULES") or "").strip()
+    if not raw:
+        return {}
+
+    out: dict[str, list[str]] = {}
+    for block in raw.split(";"):
+        block = block.strip()
+        if not block:
+            continue
+        if ":" not in block:
+            continue
+        kit, comps_raw = block.split(":", 1)
+        kit = kit.strip()
+        comps = [c.strip() for c in comps_raw.split("+") if c.strip()]
+        if kit and comps:
+            out[kit] = comps
+    return out
 
 
 def apply_kit_rules(positions: list[dict], kit_rules: dict[str, list[str]]) -> list[dict]:
@@ -172,7 +159,7 @@ def ozon_positions_from_bundle(ozon_client, order: dict) -> list[dict]:
     if not bundle_id:
         return []
 
-    # ВАЖНО: в ozon_client должен быть метод supply_order_bundle_items(bundle_id, limit=100)
+    # в ozon_client должен быть метод supply_order_bundle_items(bundle_id, limit=100)
     items = ozon_client.supply_order_bundle_items(bundle_id, limit=100)
 
     out: list[dict] = []
@@ -258,11 +245,25 @@ def build_customerorder_payload(account_name: str, order: dict, ms_positions: li
         "positions": ms_positions,
     }
 
+    # deliveryPlannedMoment из таймслота
     dm = planned_delivery_moment(order)
     if dm:
         payload["deliveryPlannedMoment"] = dm
 
+    # !!! КЛЮЧЕВОЕ: priceType "Цена продажи"
+    # Чтобы МС сам подставил цены в позициях по типу цен "Цена продажи"
+    price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
+    if price_type_href:
+        payload["priceType"] = {
+            "meta": {
+                "href": price_type_href,
+                "type": "pricetype",
+                "mediaType": "application/json",
+            }
+        }
+
     return payload
+
 
 def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
@@ -281,8 +282,8 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     duplicates = 0
     errors: list[str] = []
 
-    # cache: article -> (assortment_meta, price_value_int)
-    assortment_cache: dict[str, tuple[dict, Optional[int]]] = {}
+    # cache: article -> meta
+    assortment_cache: dict[str, dict] = {}
 
     for o in ozon_orders:
         # пропускаем виртуальные
@@ -294,7 +295,7 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             logger.info("[%s] Reached MS_LIVE_MAX=%s (attempted), stopping.", account_name, max_live)
             break
 
-        # 1) получить позиции из Ozon bundle
+        # 1) позиции из Ozon bundle
         oz_pos = ozon_positions_from_bundle(ozon_client, o)
         if not oz_pos:
             skipped += 1
@@ -303,7 +304,8 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
         # 2) развернуть комплекты
         oz_pos = apply_kit_rules(oz_pos, kit_rules)
 
-        # 3) собрать ms positions (assortment meta + quantity + price)
+        # 3) собрать позиции МС: assortment meta + quantity
+        # !!! ВАЖНО: НЕ передаём price вообще. Цена будет взята из priceType ("Цена продажи") в документе.
         ms_positions: list[dict] = []
         local_errs: list[str] = []
 
@@ -312,27 +314,20 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             qty = p["quantity"]
 
             meta: Optional[dict] = None
-            price_val: Optional[int] = None
-
             if art in assortment_cache:
-                meta, price_val = assortment_cache[art]
+                meta = assortment_cache[art]
             else:
                 row = ms.find_assortment_by_article(art)
                 if row and isinstance(row.get("meta"), dict):
-                    meta = row["meta"]              # <-- ВАЖНО: чистая meta
-                    price_val = choose_sale_price_value(row)  # <-- из salePrices
-                    assortment_cache[art] = (meta, price_val)
+                    meta = row["meta"]  # чистая meta
+                    assortment_cache[art] = meta
 
             ass = _ensure_assortment_meta(meta)
             if not ass:
                 local_errs.append(f'bad assortment meta for article="{art}"')
                 continue
 
-            pos = {"assortment": ass, "quantity": qty}
-
-            if isinstance(price_val, int):
-                pos["price"] = price_val  # цена в "копейках/центах" :contentReference[oaicite:3]{index=3}
-            ms_positions.append(pos)
+            ms_positions.append({"assortment": ass, "quantity": qty})
 
         if local_errs:
             errors.append(f'order_id={o.get("order_id")}: ' + "; ".join(local_errs))
@@ -346,12 +341,13 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
         if mode == "DRY":
             created += 1
             logger.info(
-                "[DRY][%s] Would create CustomerOrder: name=%s positions=%s order_id=%s deliveryPlannedMoment=%s",
+                "[DRY][%s] Would create CustomerOrder: name=%s positions=%s order_id=%s deliveryPlannedMoment=%s priceType=%s",
                 account_name,
                 payload.get("name"),
                 len(payload.get("positions") or []),
                 o.get("order_id"),
                 payload.get("deliveryPlannedMoment"),
+                (payload.get("priceType") or {}).get("meta", {}).get("href"),
             )
             continue
 
