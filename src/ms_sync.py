@@ -75,8 +75,7 @@ def build_customerorder_payload(account_name: str, ozon_order: dict, ms_position
     timeslot_from = ((ozon_order.get("timeslot") or {}).get("timeslot") or {}).get("from")
 
     payload = {
-        # ВАЖНО: без пробела
-        "name": f"{name_prefix}{order_number or order_id}",
+        "name": f"{name_prefix}{order_number or order_id}",  # без пробела
         "organization": _ms_meta("organization", org_id),
         "agent": _ms_meta("counterparty", agent_id),
         "store": _ms_meta("store", store_id),
@@ -127,7 +126,6 @@ def apply_kit_rules(positions: list[dict], kit_rules: dict[str, list[str]]) -> l
     if not kit_rules:
         return positions
 
-    # индекс правил по всем вариантам лат/кир
     index: dict[str, list[str]] = {}
     for kit, comps in kit_rules.items():
         for v in variants_lat_cyr(kit):
@@ -148,40 +146,13 @@ def apply_kit_rules(positions: list[dict], kit_rules: dict[str, list[str]]) -> l
             out.append(p)
             continue
 
-        # разворачиваем комплект
         for c_art in comps:
             out.append({"article": c_art, "quantity": qty, "source_kit": art})
 
     return out
 
 
-def build_ms_positions(ms: MSClient, ozon_positions: list[dict]) -> tuple[list[dict], list[str]]:
-    """
-    Сопоставляем по article -> meta.
-    Возвращаем (ms_positions, errors)
-    """
-    ms_positions: list[dict] = []
-    errors: list[str] = []
-
-    for p in ozon_positions:
-        art = p["article"]
-        qty = p["quantity"]
-
-        meta = ms.find_assortment_by_article(art)
-        if not meta:
-            errors.append(f'not found in MS by article="{art}"')
-            continue
-
-        ms_positions.append({
-            "assortment": {"meta": meta},
-            "quantity": qty,
-        })
-
-    return ms_positions, errors
-
-
 def _find_customerorder_by_name(ms: MSClient, name: str) -> dict | None:
-    # используем метод, если ты его добавил
     if hasattr(ms, "find_customerorder_by_name"):
         return ms.find_customerorder_by_name(name)  # type: ignore[attr-defined]
 
@@ -191,7 +162,6 @@ def _find_customerorder_by_name(ms: MSClient, name: str) -> dict | None:
 
 
 def _create_customerorder(ms: MSClient, payload: dict) -> dict:
-    # используем метод, если ты его добавил
     if hasattr(ms, "create_customerorder"):
         return ms.create_customerorder(payload)  # type: ignore[attr-defined]
     return ms.post("/entity/customerorder", payload)
@@ -209,7 +179,7 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
     duplicates = 0
     errors: list[str] = []
 
-    # кеш, чтобы меньше долбить МС (и меньше ловить 429)
+    # кеш meta по article, чтобы меньше долбить МС
     assortment_cache: dict[str, dict] = {}
 
     for o in ozon_orders:
@@ -223,18 +193,16 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             skipped += 1
             continue
 
-        # 1) позиции из Ozon bundle
         oz_pos = ozon_positions_from_bundle(ozon_client, o)
         if not oz_pos:
             skipped += 1
             continue
 
-        # 2) разворот комплектов по правилам
         oz_pos = apply_kit_rules(oz_pos, kit_rules)
 
-        # 3) сопоставление article -> meta в МС (с кешем)
         ms_positions: list[dict] = []
         local_errs: list[str] = []
+
         for p in oz_pos:
             art = p["article"]
             qty = p["quantity"]
@@ -249,7 +217,8 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
                 local_errs.append(f'not found in MS by article="{art}"')
                 continue
 
-            ms_positions.append({"assortment": meta, "quantity": qty})
+            # ✅ ВАЖНО: assortment должен содержать {"meta": ...}
+            ms_positions.append({"assortment": {"meta": meta}, "quantity": qty})
 
         if local_errs:
             errors.append(f'order_id={o.get("order_id")}: ' + "; ".join(local_errs))
@@ -258,10 +227,8 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             skipped += 1
             continue
 
-        # 4) payload
         payload = build_customerorder_payload(account_name, o, ms_positions)
 
-        # 5) DRY/LIVE
         if mode == "DRY":
             created += 1
             logger.info(
@@ -274,7 +241,15 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
             continue
 
         if mode == "LIVE":
-            created_doc = ms.create_customerorder(payload)
+            # анти-дубли (лучше включить в LIVE)
+            existing = _find_customerorder_by_name(ms, str(payload.get("name")))
+            if existing:
+                duplicates += 1
+                logger.info("[%s] Skip duplicate CustomerOrder name=%s order_id=%s",
+                            account_name, payload.get("name"), o.get("order_id"))
+                continue
+
+            created_doc = _create_customerorder(ms, payload)
             created += 1
             logger.info(
                 "[%s] Created CustomerOrder: name=%s id=%s",
@@ -294,6 +269,7 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
         "errors_count": len(errors),
         "errors": errors[:50],
     }
+
 
 def sync_orders_to_ms_dry(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
     """
