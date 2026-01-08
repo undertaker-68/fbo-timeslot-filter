@@ -90,39 +90,34 @@ class OzonClient:
         time.sleep(0.15)
         return r.json()
 
-    def supply_order_bundle_items(self, bundle_id: str, limit: int = 100) -> list[dict]:
-        """
-        /v1/supply-order/bundle:
-        limit должен быть строго (0, 100]
-        """
-        # clamp 1..100
-         limit = max(1, min(int(limit or 100), 100))
+def supply_order_bundle_items(self, bundle_id: str, limit: int = 100) -> list[dict]:
+    # Ozon принимает limit только (0, 100]
+    limit = max(1, min(int(limit or 100), 100))
 
-        url = f"{BASE_URL}/v1/supply-order/bundle"
-        items: list[dict] = []
-        last_id = ""
+    url = "https://api-seller.ozon.ru/v1/supply-order/bundle"
+    items = []
+    last_id = ""
 
-        while True:
-            payload = {"bundle_ids": [bundle_id], "limit": limit}
-            if last_id:
-                payload["last_id"] = last_id
+    while True:
+        payload = {
+            "bundle_ids": [bundle_id],
+            "limit": limit,
+        }
+        if last_id:
+            payload["last_id"] = last_id
 
-            r = _post_with_retry(self.session, url, self.name, payload)
-            data = r.json() or {}
+        r = self._post(url, payload)
+        data = r.json()
 
-            items.extend(data.get("items", []) or [])
-            if not data.get("has_next"):
-                break
+        items.extend(data.get("items", []))
+        if not data.get("has_next"):
+            break
 
-            last_id = data.get("last_id") or ""
-            if not last_id:
-                break
+        last_id = data.get("last_id") or ""
+        if not last_id:
+            break
 
-            # мягко притормозим между страницами bundle
-            time.sleep(0.05)
-
-        return [{"offer_id": x.get("offer_id"), "quantity": x.get("quantity")} for x in items]
-
+    return items
 
 def iter_accounts(prefix: str = "OZON", max_accounts: int = 20):
     """
