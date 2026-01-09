@@ -753,7 +753,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
         if not customerorder_id:
             # На всякий случай (DRY или если заказ не писали в этом прогоне):
             try:
-                co = ms.find_customerorder_by_name(co_name)
+                co = ms.find_customerorder_by_external_code(co_name)
                 if co and co.get("id"):
                     customerorder_id = co["id"]
             except Exception:
@@ -834,40 +834,8 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         demand_payload = {
             "name": co_name,
-            "description": descr,
             "externalCode": f"{account_name}:{order_id}",
-
-            "applicable": True,
-            "state": {
-                "meta": {
-                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/state/{DEMAND_STATE_ID}",
-                    "type": "state",
-                    "mediaType": "application/json",
-                }
-            },
-            "organization": {
-                "meta": {
-                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/organization/{org_id}",
-                    "type": "organization",
-                    "mediaType": "application/json",
-                }
-            },
-            "agent": {
-                "meta": {
-                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/counterparty/{agent_id}",
-                    "type": "counterparty",
-                    "mediaType": "application/json",
-                }
-            },
-            "store": {
-                "meta": {
-                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/store/{store_id}",
-                    "type": "store",
-                    "mediaType": "application/json",
-                }
-            },
-
-            # ключевое: связка с заказом
+            "description": "Auto-generated Demand",
             "customerOrder": {
                 "meta": {
                     "href": customerorder_href,
@@ -875,8 +843,14 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
                     "mediaType": "application/json",
                 }
             },
-
             "positions": ms_positions,
+            "state": {
+                "meta": {
+                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/state/{DEMAND_STATE_ID}",
+                    "type": "state",
+                    "mediaType": "application/json",
+                }
+            },
         }
 
         if mode == "DRY":
@@ -889,21 +863,16 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
         attempted += 1
 
         try:
-            # 1) пробуем провести
-            try:
-                ms.create_demand(demand_payload)
-                created += 1
-                logger.info("[LIVE][%s] Created Demand (applicable): order_id=%s", account_name, order_id)
-            except Exception:
-                # 2) если не вышло — создаём непроведённой
-                demand_payload["applicable"] = False
-                ms.create_demand(demand_payload)
-                created_unapplicable += 1
-                logger.info("[LIVE][%s] Created Demand (NOT applicable): order_id=%s", account_name, order_id)
-
-        except Exception as e:
-            errors.append(f"order_id={order_id}: {e}")
-            logger.exception("[%s] demand create error", account_name)
+            # 1) пробуем создать Demand
+            ms.create_demand(demand_payload)
+            created += 1
+            logger.info("[LIVE][%s] Created Demand (applicable): order_id=%s", account_name, order_id)
+        except Exception:
+            # 2) если не вышло — создаём непроведённым
+            demand_payload["applicable"] = False
+            ms.create_demand(demand_payload)
+            created_unapplicable += 1
+            logger.info("[LIVE][%s] Created Demand (NOT applicable): order_id=%s", account_name, order_id)
 
     return {
         "mode": mode,
@@ -916,4 +885,3 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
         "warnings": warnings,
         "attempted": attempted,
     }
-
