@@ -232,6 +232,7 @@ class MSClient:
         return self.post("/entity/demand", payload)
 
 
+
     # -------- Assortment by article --------
 
     def find_assortment_by_article(self, article: str) -> dict | None:
