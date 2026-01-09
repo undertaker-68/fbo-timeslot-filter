@@ -765,7 +765,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         customerorder_href = f"https://api.moysklad.ru/api/remap/1.2/entity/customerorder/{customerorder_id}"
 
-        # Если Demand уже есть -> полный skip (по твоему требованию)
+        # Если Demand уже есть -> полный skip
         try:
             existing = ms.find_demand_by_customerorder_href(customerorder_href)
         except Exception as e:
@@ -774,8 +774,6 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         if existing:
             skipped_exists += 1
-            if mode == "DRY":
-                logger.info("[DRY][%s] Demand exists -> SKIP: order_id=%s customerOrder=%s", account_name, order_id, customerorder_id)
             continue
 
         # ---------- позиции как в заказе/перемещении ----------
