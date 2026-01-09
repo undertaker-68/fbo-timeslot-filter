@@ -7,8 +7,6 @@ from .timeslot_filter import is_timeslot_valid
 
 from .ms_sync import sync_orders_to_ms, sync_moves_from_orders, sync_demands_from_orders
 
-CHECK_DEMANDS_ONLY = os.getenv("CHECK_DEMANDS_ONLY", "0")  # 0 - не проверяем только отгрузки, 1 - только отгрузки
-
 def get_states():
     """
     Статусы поставок (supply.state), которые считаем валидными.
