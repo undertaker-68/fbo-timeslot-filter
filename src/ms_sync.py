@@ -697,6 +697,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
       - Связь в МС: customerOrder.
     """
 
+   # Проверяем флаг CHECK_DEMANDS_ONLY
     if os.getenv("CHECK_DEMANDS_ONLY", "0") == "1":
         logger.info("CHECK_DEMANDS_ONLY is set to 1, skipping orders and moves checks.")
         # Пропускаем проверки заказов и перемещений и сразу проверяем отгрузки
