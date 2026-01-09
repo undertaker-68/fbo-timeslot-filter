@@ -199,6 +199,28 @@ class MSClient:
         except Exception:
             self.post(f"/entity/move/{move_id}/positions", {"positions": positions})
 
+        # -------- Demand helpers --------
+
+    def find_demand_by_customerorder_href(self, customerorder_href: str) -> dict | None:
+        """
+        Ищем demand по привязке customerOrder (href).
+        Если найдено >1 — это аномалия, чтобы не плодить бардак.
+        """
+        customerorder_href = (customerorder_href or "").strip()
+        if not customerorder_href:
+            return None
+
+        data = self.get("/entity/demand", params={"filter": f"customerOrder={customerorder_href}", "limit": 2})
+        rows = data.get("rows") or []
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise RuntimeError(f"Multiple Demand found for customerOrder={customerorder_href}")
+        return rows[0]
+
+    def create_demand(self, payload: dict) -> dict:
+        return self.post("/entity/demand", payload)
+
 
     # -------- Assortment by article --------
 
