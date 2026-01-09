@@ -696,6 +696,15 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
       - Если Demand уже есть -> НИЧЕГО не делаем (полный skip).
       - Связь в МС: customerOrder.
     """
+    # Инициализация переменных
+    created = 0
+    created_unapplicable = 0  # Инициализация переменной
+    skipped_not_ready = 0
+    skipped_exists = 0
+    skipped = 0
+    errors: list[str] = []
+    warnings: list[str] = []
+    
     attempted = 0
     mode = (os.getenv("MS_MODE") or "DRY").upper()
     max_live = int(os.getenv("MS_LIVE_MAX", "0") or "0")
