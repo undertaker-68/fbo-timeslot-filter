@@ -423,12 +423,14 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
                 # 2) перезаписываем позиции
                 ms.replace_customerorder_positions(ms_id, payload.get("positions") or [])
 
+                o["_ms_customerorder_id"] = ms_id
                 updated += 1
                 logger.info("[LIVE][%s] Updated CustomerOrder: name=%s id=%s order_id=%s", account_name, name, ms_id, o.get("order_id"))
             else:
                 created_doc = ms.create_customerorder(payload)
                 created += 1
                 doc_id = created_doc.get("id") or ((created_doc.get("meta") or {}).get("href") or "")
+                o["_ms_customerorder_id"] = created_doc.get("id")
                 logger.info("[LIVE][%s] Created CustomerOrder: name=%s id=%s order_id=%s", account_name, created_doc.get("name"), doc_id, o.get("order_id"))
 
         except Exception as e:
