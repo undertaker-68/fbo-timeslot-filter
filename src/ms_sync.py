@@ -629,6 +629,16 @@ def sync_moves_from_orders(ozon_client, account_name: str, ozon_orders: list[dic
                     "positions": ms_positions,
                 }
 
+                customerorder_id = o.get("_ms_customerorder_id")
+                if customerorder_id:
+                    payload["customerOrder"] = {
+                        "meta": {
+                            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/customerorder/{customerorder_id}",
+                            "type": "customerorder",
+                            "mediaType": "application/json",
+                        }
+                    }
+
                 # 1) пробуем создать проведённым
                 try:
                     ms.create_move(payload)
