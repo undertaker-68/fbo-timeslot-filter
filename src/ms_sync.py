@@ -761,6 +761,11 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         customerorder_href = f"https://api.moysklad.ru/api/remap/1.2/entity/customerorder/{customerorder_id}"
 
+        # Проверяем, если заказ имеет статус "READY_TO_SUPPLY"
+        if "READY_TO_SUPPLY" in [s.get("state") for s in o.get("supplies", [])]:
+            skipped_not_ready += 1
+            continue  # Пропускаем создание отгрузки, если статус READY_TO_SUPPLY
+
         # Если Demand уже существует -> пропускаем создание
         try:
             existing = ms.find_demand_by_customerorder_href(customerorder_href)
@@ -770,7 +775,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         if existing:
             skipped_exists += 1
-            continue
+            continue  # Пропускаем создание Demand
 
         # ---------- позиции как в заказе/перемещении ----------
         oz_pos = ozon_positions_from_bundle(ozon_client, o)
