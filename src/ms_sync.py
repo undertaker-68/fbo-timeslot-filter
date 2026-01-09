@@ -445,3 +445,113 @@ def sync_orders_to_ms(ozon_client, account_name: str, ozon_orders: list[dict]) -
         "warnings": warnings,
         "attempted": attempted,
     }
+
+MOVE_STATE_ID = "b0d2c89d-5c7c-11ef-0a80-0cd4001f5885"
+MOVE_SOURCE_STORE_ID = "7cdb9b20-9910-11ec-0a80-08670002d998"
+
+def sync_moves_from_orders(account_name: str, orders: list[dict]) -> dict[str, Any]:
+    attempted = 0
+    mode = (os.getenv("MS_MODE") or "DRY").upper()
+    max_live = int(os.getenv("MS_LIVE_MAX", "0") or "0")
+
+    ms = MSClient()
+
+    created = 0
+    created_unapplicable = 0
+    updated = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for o in orders:
+        if mode == "LIVE" and max_live > 0 and attempted >= max_live:
+            logger.info("[%s] Reached MS_LIVE_MAX=%s (attempted), stopping.", account_name, max_live)
+            break
+
+        order_id = o.get("order_id")
+        order_number = (o.get("order_number") or "").strip()
+        external_code = f"{account_name}:{order_id}"
+
+        # позиции берём уже готовые из CustomerOrder-логики
+        # (мы предполагаем, что заказы уже успешно синхронизированы)
+        # здесь используем те же positions, что и для заказа
+
+        # ❗ ты позже можешь заменить источник, если понадобится
+        positions = o.get("_ms_positions")
+        if not positions:
+            skipped += 1
+            continue
+
+        payload = {
+            "name": order_number,
+            "description": order_number,
+            "externalCode": external_code,
+            "applicable": True,
+
+            "state": {
+                "meta": {
+                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/state/{MOVE_STATE_ID}",
+                    "type": "state",
+                    "mediaType": "application/json",
+                }
+            },
+            "organization": o["_ms_organization"],
+            "sourceStore": {
+                "meta": {
+                    "href": f"https://api.moysklad.ru/api/remap/1.2/entity/store/{MOVE_SOURCE_STORE_ID}",
+                    "type": "store",
+                    "mediaType": "application/json",
+                }
+            },
+            "targetStore": o["_ms_target_store"],
+            "positions": positions,
+        }
+
+        existing = None
+        try:
+            existing = ms.find_move_by_external_code(external_code)
+        except Exception as e:
+            errors.append(f"order_id={order_id}: {e}")
+            continue
+
+        if mode == "DRY":
+            logger.info(
+                "[DRY][%s] Would %s Move: order_id=%s positions=%s",
+                account_name,
+                "UPDATE" if existing else "CREATE",
+                order_id,
+                len(positions),
+            )
+            continue
+
+        attempted += 1
+
+        try:
+            if existing:
+                move_id = existing.get("id") or ((existing.get("meta") or {}).get("href") or "").rsplit("/", 1)[-1]
+                ms.replace_move_positions(move_id, positions)
+                updated += 1
+                logger.info("[LIVE][%s] Updated Move: id=%s order_id=%s", account_name, move_id, order_id)
+            else:
+                try:
+                    ms.create_move(payload)
+                    created += 1
+                    logger.info("[LIVE][%s] Created Move (applicable): order_id=%s", account_name, order_id)
+                except Exception:
+                    payload["applicable"] = False
+                    ms.create_move(payload)
+                    created_unapplicable += 1
+                    logger.info("[LIVE][%s] Created Move (NOT applicable): order_id=%s", account_name, order_id)
+
+        except Exception as e:
+            errors.append(f"order_id={order_id}: {e}")
+            logger.exception("[%s] move upsert error", account_name)
+
+    return {
+        "mode": mode,
+        "created": created,
+        "created_unapplicable": created_unapplicable,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "attempted": attempted,
+    }
