@@ -126,6 +126,16 @@ class MSClient:
         rows = data.get("rows") or []
         return rows[0] if rows else None
 
+    def find_customerorder_by_external_code(self, external_code: str) -> dict | None:
+        """
+        Ищем заказ по externalCode, возвращаем его ID.
+        """
+        data = self.get("/entity/customerorder", params={"filter": f"externalCode={external_code}", "limit": 1})
+        rows = data.get("rows") or []
+        if rows:
+            return rows[0]
+        return None
+
     def create_customerorder(self, payload: dict) -> dict:
         return self.post("/entity/customerorder", payload)
 
