@@ -161,6 +161,45 @@ class MSClient:
         except Exception:
             self.post(f"/entity/customerorder/{order_id}/positions", {"positions": positions})
 
+    # -------- Move helpers --------
+
+    def find_move_by_external_code(self, external_code: str) -> dict | None:
+        data = self.get(
+            "/entity/move",
+            params={"filter": f"externalCode={external_code}", "limit": 2},
+        )
+        rows = data.get("rows") or []
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise RuntimeError(f"Multiple Move found for externalCode={external_code}")
+        return rows[0]
+
+
+    def create_move(self, payload: dict) -> dict:
+        return self.post("/entity/move", payload)
+
+
+    def update_move(self, move_id: str, payload: dict) -> dict:
+        return self.put(f"/entity/move/{move_id}", payload)
+
+
+    def replace_move_positions(self, move_id: str, positions: list[dict]) -> None:
+        current = self.get(f"/entity/move/{move_id}/positions", params={"limit": 1000})
+        for p in current.get("rows") or []:
+            pid = p.get("id")
+            if pid:
+                self.delete(f"/entity/move/{move_id}/positions/{pid}")
+
+        if not positions:
+            return
+
+        try:
+            self.post(f"/entity/move/{move_id}/positions", positions)
+        except Exception:
+            self.post(f"/entity/move/{move_id}/positions", {"positions": positions})
+
+
     # -------- Assortment by article --------
 
     def find_assortment_by_article(self, article: str) -> dict | None:
