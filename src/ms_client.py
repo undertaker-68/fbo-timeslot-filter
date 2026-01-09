@@ -213,8 +213,8 @@ class MSClient:
 
     def find_demand_by_customerorder_href(self, customerorder_href: str) -> dict | None:
         """
-        Ищем demand по привязке customerOrder (href).
-        Если найдено >1 — это аномалия, чтобы не плодить бардак.
+        Ищем отгрузку по customerOrder (ссылка на заказ).
+        Если найдено >1 — это аномалия.
         """
         customerorder_href = (customerorder_href or "").strip()
         if not customerorder_href:
