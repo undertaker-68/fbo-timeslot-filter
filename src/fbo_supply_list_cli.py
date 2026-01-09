@@ -5,7 +5,7 @@ from .logger import logger
 from .ozon_client import iter_accounts
 from .timeslot_filter import is_timeslot_valid
 
-from .ms_sync import sync_orders_to_ms, sync_moves_from_orders
+from .ms_sync import sync_orders_to_ms, sync_moves_from_orders, sync_demands_from_orders
 
 def get_states():
     """
@@ -118,6 +118,9 @@ def main():
                 logger.info("[%s] MS DRY result: %s", client.name, ms_result)
                 ms_moves_result = sync_moves_from_orders(client, client.name.upper(), kept)
                 logger.info("[%s] MS MOVES result: %s", client.name, ms_moves_result)
+                if (os.getenv("SYNC_DEMANDS") or "").strip() == "1":
+                    ms_demands_result = sync_demands_from_orders(client, client.name.upper(), kept)
+                    logger.info("[%s] MS DEMANDS result: %s", client.name, ms_demands_result)
 
             except Exception as e:
                 logger.exception("[%s] MS DRY error: %s", client.name, e)
