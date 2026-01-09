@@ -694,7 +694,6 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
     Demand (Отгрузка):
       - Создаём ТОЛЬКО если supply.state != READY_TO_SUPPLY (по whitelist статусов).
       - Если Demand уже есть -> НИЧЕГО не делаем (полный skip).
-      - Если создать applicable=True не удалось -> создаём applicable=False (как у move).
       - Связь в МС: customerOrder.
     """
     attempted = 0
@@ -705,7 +704,6 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
     kit_rules = load_kit_rules()
 
     created = 0
-    created_unapplicable = 0
     skipped_not_ready = 0
     skipped_exists = 0
     skipped = 0
@@ -748,10 +746,8 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
         # Важно: это тот же CustomerOrder name, который уже используется
         co_name = f"{name_prefix}{order_number}"
 
-        # Ссылка на CustomerOrder (чтобы demand отображался в "связке")
         customerorder_id = o.get("_ms_customerorder_id")
         if not customerorder_id:
-            # На всякий случай (DRY или если заказ не писали в этом прогоне):
             try:
                 co = ms.find_customerorder_by_external_code(co_name)
                 if co and co.get("id"):
@@ -765,7 +761,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         customerorder_href = f"https://api.moysklad.ru/api/remap/1.2/entity/customerorder/{customerorder_id}"
 
-        # Если Demand уже есть -> полный skip
+        # Если Demand уже существует -> пропускаем создание
         try:
             existing = ms.find_demand_by_customerorder_href(customerorder_href)
         except Exception as e:
@@ -833,7 +829,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
         demand_payload = {
             "name": co_name,
             "externalCode": f"{account_name}:{order_id}",
-            "description": "Auto-generated Demand",
+            "description": descr,
             "customerOrder": {
                 "meta": {
                     "href": customerorder_href,
@@ -866,7 +862,6 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
             created += 1
             logger.info("[LIVE][%s] Created Demand (applicable): order_id=%s", account_name, order_id)
         except Exception:
-            # 2) если не вышло — создаём непроведённым
             demand_payload["applicable"] = False
             ms.create_demand(demand_payload)
             created_unapplicable += 1
