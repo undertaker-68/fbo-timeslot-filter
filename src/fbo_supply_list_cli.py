@@ -112,6 +112,7 @@ def main():
                 and order_has_wanted_supply_state(o, wanted_states)
                 and is_timeslot_valid(o)
             ]
+            logger.info(f"Total orders: {len(all_orders)}, filtered orders: {len(kept)}")
 
             try:
                 ms_result = sync_orders_to_ms(client, client.name.upper(), kept)
