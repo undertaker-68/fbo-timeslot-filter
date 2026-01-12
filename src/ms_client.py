@@ -212,20 +212,27 @@ class MSClient:
 
     def find_demand_by_customerorder_href(self, customerorder_href: str) -> dict | None:
         """
-        Ищем demand по привязке customerOrder (href).
-        Если найдено >1 — это аномалия, чтобы не плодить бардак.
+        Ищем demand по привязке к CustomerOrder.
+        В МС нельзя фильтровать /entity/demand по customerOrder, поэтому читаем сам заказ и смотрим поле demands.
+        Возвращаем meta demand (или None).
         """
         customerorder_href = (customerorder_href or "").strip()
         if not customerorder_href:
             return None
 
-        data = self.get("/entity/demand", params={"filter": f"customerOrder={customerorder_href}", "limit": 2})
-        rows = data.get("rows") or []
-        if not rows:
+        # достаём id заказа из href
+        customerorder_id = customerorder_href.rstrip("/").split("/")[-1]
+
+        co = self.get(f"/entity/customerorder/{customerorder_id}")
+        demands = co.get("demands") or []
+
+        if not demands:
             return None
-        if len(rows) > 1:
+        if len(demands) > 1:
             raise RuntimeError(f"Multiple Demand found for customerOrder={customerorder_href}")
-        return rows[0]
+
+        # demands[0] — это meta-объект отгрузки
+        return demands[0]
 
     def create_demand(self, payload: dict) -> dict:
         return self.post("/entity/demand", payload)
