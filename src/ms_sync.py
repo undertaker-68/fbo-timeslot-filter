@@ -768,6 +768,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         # Если Demand уже существует -> пропускаем создание
         try:
+            logger.info(f"Checking if Demand exists for customerOrder: {customerorder_href}")
             existing = ms.find_demand_by_customerorder_href(customerorder_href)
         except Exception as e:
             errors.append(f"order_id={order_id}: {e}")
@@ -863,6 +864,7 @@ def sync_demands_from_orders(ozon_client, account_name: str, ozon_orders: list[d
 
         try:
             # 1) пробуем создать Demand
+            logger.info(f"Creating demand for order_id={order_id} with customerOrder={customerorder_id}")
             ms.create_demand(demand_payload)
             created += 1
             logger.info("[LIVE][%s] Created Demand (applicable): order_id=%s", account_name, order_id)
