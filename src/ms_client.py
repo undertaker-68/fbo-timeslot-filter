@@ -208,13 +208,12 @@ class MSClient:
             self.post(f"/entity/move/{move_id}/positions", positions)
         except Exception:
             self.post(f"/entity/move/{move_id}/positions", {"positions": positions})
-
-        # -------- Demand helpers --------
+    # -------- Demand helpers --------
 
     def find_demand_by_customerorder_href(self, customerorder_href: str) -> dict | None:
         """
-        Ищем отгрузку по customerOrder (ссылка на заказ).
-        Если найдено >1 — это аномалия.
+        Ищем demand по привязке customerOrder (href).
+        Если найдено >1 — это аномалия, чтобы не плодить бардак.
         """
         customerorder_href = (customerorder_href or "").strip()
         if not customerorder_href:
@@ -230,8 +229,6 @@ class MSClient:
 
     def create_demand(self, payload: dict) -> dict:
         return self.post("/entity/demand", payload)
-
-
 
     # -------- Assortment by article --------
 
