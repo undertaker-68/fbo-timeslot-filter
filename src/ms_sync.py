@@ -452,220 +452,102 @@ MOVE_STATE_ID = "b0d2c89d-5c7c-11ef-0a80-0cd4001f5885"
 MOVE_SOURCE_STORE_ID = "7cdb9b20-9910-11ec-0a80-08670002d998"
 DEMAND_STATE_ID = "b543e330-44e4-11f0-0a80-0da5002260ab"
 
-def sync_moves_from_orders(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
-    """
-    1 заказ = 1 перемещение (move)
-    Upsert:
-      - если move существует -> обновляем ТОЛЬКО позиции (qty/price)
-      - если нет -> создаём (applicable=True, если ошибка -> applicable=False)
-    """
-    attempted = 0
-    mode = (os.getenv("MS_MODE") or "DRY").upper()
-    max_live = int(os.getenv("MS_LIVE_MAX", "0") or "0")
+# def sync_moves_from_orders(ozon_client, account_name: str, ozon_orders: list[dict]) -> dict[str, Any]:
+#     logger = logging.getLogger(__name__)
+#
+#     mode = os.getenv("MS_MODE", "DRY").upper()
+#
+#     created = 0
+#     created_unapplicable = 0
+#     updated = 0
+#     skipped = 0
+#     errors: list[str] = []
+#     warnings: list[str] = []
+#
+#     for order in ozon_orders:
+#         order_id = order.get("order_id")
+#         external_code = f"OZON_FBO_MOVE_{order_id}"
+#
+#         ms_positions = build_move_positions(order)
+#         if not ms_positions:
+#             skipped += 1
+#             continue
+#
+#         doc_name = f"Ozon FBO move {order_id}"
+#         descr = f"Ozon FBO move from order {order_id}"
+#
+#         try:
+#             existing = ms.find_move_by_external_code(external_code)
+#         except Exception as e:
+#             errors.append(f"order_id={order_id}: {e}")
+#             continue
+#
+#         # === DISABLED: updating existing Move documents ===
+#         if existing:
+#             logger.info(
+#                 "[%s] Move exists -> SKIP (updates disabled): externalCode=%s order_id=%s",
+#                 account_name,
+#                 external_code,
+#                 order_id,
+#             )
+#             skipped += 1
+#             continue
+#
+#         if mode == "DRY":
+#             logger.info(
+#                 "[DRY][%s] Would CREATE Move: externalCode=%s name=%s positions=%s order_id=%s",
+#                 account_name,
+#                 external_code,
+#                 doc_name,
+#                 len(ms_positions),
+#                 order_id,
+#             )
+#             continue
+#
+#         try:
+#             payload = {
+#                 "name": doc_name,
+#                 "description": descr,
+#                 "externalCode": external_code,
+#                 "applicable": True,
+#                 "organization": ms.organization_meta,
+#                 "sourceStore": ms.fbo_source_store_meta,
+#                 "targetStore": ms.fbo_target_store_meta,
+#                 "positions": ms_positions,
+#             }
+#
+#             try:
+#                 ms.create_move(payload)
+#                 created += 1
+#                 logger.info(
+#                     "[LIVE][%s] Created Move (applicable): order_id=%s",
+#                     account_name,
+#                     order_id,
+#                 )
+#             except Exception:
+#                 payload["applicable"] = False
+#                 ms.create_move(payload)
+#                 created_unapplicable += 1
+#                 logger.info(
+#                     "[LIVE][%s] Created Move (NOT applicable): order_id=%s",
+#                     account_name,
+#                     order_id,
+#                 )
+#
+#         except Exception as e:
+#             errors.append(f"order_id={order_id}: {e}")
+#             logger.exception("[%s] move create error", account_name)
+#
+#     return {
+#         "mode": mode,
+#         "created": created,
+#         "created_unapplicable": created_unapplicable,
+#         "updated": updated,
+#         "skipped": skipped,
+#         "errors": errors,
+#         "warnings": warnings,
+#     }
 
-    ms = MSClient()
-    kit_rules = load_kit_rules()
-
-    created = 0
-    created_unapplicable = 0
-    updated = 0
-    skipped = 0
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    assortment_cache: dict[str, dict] = {}
-
-    price_type_href = (os.getenv("MS_PRICE_TYPE_HREF") or "").strip()
-    price_type_name = (os.getenv("MS_PRICE_TYPE_NAME") or "Цена продажи").strip()
-
-    # targetStore (склад куда) = тот же, что в Заказе -> у тебя это MS_STORE_ID
-    target_store_id = (os.getenv("MS_STORE_ID") or "").strip()
-    if not target_store_id:
-        raise RuntimeError("MS_STORE_ID не задан в .env")
-
-    for o in ozon_orders:
-        # пропускаем виртуальные (как в заказах)
-        if (o.get("order_tags") or {}).get("is_virtual"):
-            skipped += 1
-            continue
-
-        if mode == "LIVE" and max_live > 0 and attempted >= max_live:
-            logger.info("[%s] Reached MS_LIVE_MAX=%s (attempted), stopping.", account_name, max_live)
-            break
-
-        order_id = o.get("order_id")
-        order_number = (o.get("order_number") or "").strip()
-
-        # Название документа = как в Заказе (CustomerOrder name)
-        name_prefix = (os.getenv("MS_NAME_PREFIX") or "fbo-").strip() or "fbo-"
-        doc_name = f"{name_prefix}{order_number}"
-
-        # Комментарий = как в Заказе (CustomerOrder description)
-        city = destination_city(o)
-        descr = f"{order_number} - {city}" if city else f"{order_number}"
-
-        external_code = f"{account_name}:{order_id}"
-
-        # ----------- собираем позиции так же, как для CustomerOrder -----------
-        oz_pos = ozon_positions_from_bundle(ozon_client, o)
-        if not oz_pos:
-            skipped += 1
-            continue
-
-        oz_pos = apply_kit_rules(oz_pos, kit_rules)
-
-        ms_positions: list[dict] = []
-        local_errs: list[str] = []
-
-        for p in oz_pos:
-            art = (p.get("article") or "").strip()
-            qty = float(p.get("quantity") or 0)
-
-            if not art or qty <= 0:
-                continue
-
-            row: Optional[dict] = None
-            if art in assortment_cache:
-                row = assortment_cache[art]
-            else:
-                found = ms.find_assortment_by_article(art)
-                if found:
-                    row = found
-                    assortment_cache[art] = found
-
-            if not row:
-                local_errs.append(f'not found in MS by article="{art}"')
-                continue
-
-            ass = _ensure_assortment_meta(row.get("meta"))
-            if not ass:
-                local_errs.append(f'bad assortment meta for article="{art}"')
-                continue
-
-            price_val = _extract_sale_price_value(
-                row,
-                price_type_href=price_type_href,
-                price_type_name=price_type_name,
-            )
-            if price_val is None:
-                warnings.append(f'order_id={order_id}: no sale price "{price_type_name}" for article="{art}" -> price=0')
-                price_val = 0
-
-            ms_positions.append({
-                "assortment": ass,
-                "quantity": qty,
-                "price": int(price_val),
-            })
-
-        if local_errs:
-            errors.append(f'order_id={order_id}: ' + "; ".join(local_errs))
-
-        if not ms_positions:
-            skipped += 1
-            continue
-
-        # ----------- UPSERT move -----------
-        try:
-            existing = ms.find_move_by_external_code(external_code)
-        except Exception as e:
-            errors.append(f"order_id={order_id}: {e}")
-            continue
-
-        if mode == "DRY":
-            logger.info(
-                "[DRY][%s] Would %s Move: externalCode=%s name=%s positions=%s order_id=%s",
-                account_name,
-                "UPDATE" if existing else "CREATE",
-                external_code,
-                doc_name,
-                len(ms_positions),
-                order_id,
-            )
-            continue
-
-        attempted += 1
-
-        try:
-            if existing:
-                move_id = existing.get("id") or ((existing.get("meta") or {}).get("href") or "").rsplit("/", 1)[-1]
-                ms.replace_move_positions(move_id, ms_positions)
-                updated += 1
-                logger.info("[LIVE][%s] Updated Move positions: id=%s order_id=%s", account_name, move_id, order_id)
-            else:
-                payload = {
-                    "name": doc_name,
-                    "description": descr,
-                    "externalCode": external_code,
-                    "applicable": True,
-
-                    "state": {
-                        "meta": {
-                            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/state/{MOVE_STATE_ID}",
-                            "type": "state",
-                            "mediaType": "application/json",
-                        }
-                    },
-                    # организация = как в заказе (берём из env, так же как в build_customerorder_payload)
-                    "organization": {
-                        "meta": {
-                            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/organization/{(os.getenv('MS_ORGANIZATION_ID') or '').strip()}",
-                            "type": "organization",
-                            "mediaType": "application/json",
-                        }
-                    },
-                    "sourceStore": {
-                        "meta": {
-                            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/store/{MOVE_SOURCE_STORE_ID}",
-                            "type": "store",
-                            "mediaType": "application/json",
-                        }
-                    },
-                    "targetStore": {
-                        "meta": {
-                            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/store/{target_store_id}",
-                            "type": "store",
-                            "mediaType": "application/json",
-                        }
-                    },
-                    "positions": ms_positions,
-                }
-
-                customerorder_id = o.get("_ms_customerorder_id")
-                if customerorder_id:
-                    payload["customerOrder"] = {
-                        "meta": {
-                            "href": f"https://api.moysklad.ru/api/remap/1.2/entity/customerorder/{customerorder_id}",
-                            "type": "customerorder",
-                            "mediaType": "application/json",
-                        }
-                    }
-
-                # 1) пробуем создать проведённым
-                try:
-                    ms.create_move(payload)
-                    created += 1
-                    logger.info("[LIVE][%s] Created Move (applicable): order_id=%s", account_name, order_id)
-                except Exception:
-                    # 2) если не вышло — создаём непроведённым
-                    payload["applicable"] = False
-                    ms.create_move(payload)
-                    created_unapplicable += 1
-                    logger.info("[LIVE][%s] Created Move (NOT applicable): order_id=%s", account_name, order_id)
-
-        except Exception as e:
-            errors.append(f"order_id={order_id}: {e}")
-            logger.exception("[%s] move upsert error", account_name)
-
-    return {
-        "mode": mode,
-        "created": created,
-        "created_unapplicable": created_unapplicable,
-        "updated": updated,
-        "skipped": skipped,
-        "errors": errors,
-        "warnings": warnings,
-        "attempted": attempted,
-    }
 
 DEMAND_ALLOWED_SUPPLY_STATES = {
     "ACCEPTED_AT_SUPPLY_WAREHOUSE",
