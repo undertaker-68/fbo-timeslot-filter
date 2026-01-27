@@ -117,7 +117,7 @@ def main():
             try:
                 ms_result = sync_orders_to_ms(client, client.name.upper(), kept)
                 logger.info("[%s] MS DRY result: %s", client.name, ms_result)
-                ms_moves_result = sync_moves_from_orders(client, client.name.upper(), kept)
+                #ms_moves_result = sync_moves_from_orders(client, client.name.upper(), kept)
                 logger.info("[%s] MS MOVES result: %s", client.name, ms_moves_result)
                 if (os.getenv("SYNC_DEMANDS") or "").strip() == "1":
                     ms_demands_result = sync_demands_from_orders(client, client.name.upper(), kept)
